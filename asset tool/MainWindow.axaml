@@ -1,0 +1,70 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="using:asset_tool"
+        mc:Ignorable="d" d:DesignWidth="1400" d:DesignHeight="900"
+        x:Class="asset_tool.MainWindow"
+        Width="1400" Height="900"
+        WindowStartupLocation="CenterScreen"
+        Title="Spine Part Splitter">
+    <Grid RowDefinitions="Auto,*,Auto" Margin="10">
+        <StackPanel Grid.Row="0" Orientation="Vertical" Spacing="6" Margin="0,0,0,10">
+            <StackPanel Orientation="Horizontal" Spacing="10">
+                <Button x:Name="OpenButton" Content="PNG 열기" Click="OnOpenClick"/>
+                <TextBlock x:Name="FilePathText" VerticalAlignment="Center" Text="(파일 없음)"/>
+                <Button x:Name="SplitButton" Content="자동 감지로 분리" Click="OnSplitClick" IsEnabled="False"/>
+                <Button x:Name="AtlasOpenButton" Content="아틀라스 불러오기 (.atlas)" Click="OnAtlasOpenClick"/>
+                <TextBlock x:Name="AtlasPathText" VerticalAlignment="Center" Text="(아틀라스 없음)"/>
+                <Button x:Name="AtlasSplitButton" Content="아틀라스로 분리" Click="OnAtlasSplitClick" IsEnabled="False"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Spacing="10">
+                <CheckBox x:Name="CutoutCheckBox" Content="가장자리 배경 자동 제거 (누끼)" IsChecked="True"/>
+                <TextBlock Text="허용 오차:" VerticalAlignment="Center"/>
+                <TextBox x:Name="CutoutToleranceBox" Text="100" Width="50"/>
+                <CheckBox x:Name="IslandCheckBox" Content="내부에 작게 낀 다른 파츠 제거 (비슷한 크기 덩어리는 유지)" IsChecked="True"/>
+            </StackPanel>
+        </StackPanel>
+
+        <Grid Grid.Row="1" ColumnDefinitions="*,320">
+            <Border Grid.Column="0" BorderBrush="Gray" BorderThickness="1">
+                <ScrollViewer>
+                    <Image x:Name="PreviewImage" Stretch="Uniform"/>
+                </ScrollViewer>
+            </Border>
+
+            <Border Grid.Column="1" BorderBrush="Gray" BorderThickness="1" Margin="10,0,0,0">
+                <Grid RowDefinitions="Auto,*">
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="6" Margin="6" >
+                        <Button x:Name="SelectAllButton" Content="전체 선택" Click="OnSelectAllClick"/>
+                        <Button x:Name="DeselectAllButton" Content="전체 해제" Click="OnDeselectAllClick"/>
+                        <TextBlock x:Name="SelectionCountText" VerticalAlignment="Center" Foreground="Gray"/>
+                    </StackPanel>
+                    <ScrollViewer Grid.Row="1">
+                        <ItemsControl x:Name="PartsList">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate x:DataType="local:PartItem">
+                                    <Border BorderBrush="LightGray" BorderThickness="0,0,0,1" Padding="6">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <CheckBox IsChecked="{Binding Include, Mode=TwoWay}" VerticalAlignment="Center"/>
+                                            <Image Source="{Binding Thumbnail}" Width="48" Height="48" Stretch="Uniform" VerticalAlignment="Center"/>
+                                            <StackPanel VerticalAlignment="Center">
+                                                <TextBox Text="{Binding Name, Mode=TwoWay}" Width="190"/>
+                                                <TextBlock Text="{Binding SizeText}" FontSize="10" Foreground="Gray"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="10" Margin="0,10,0,0">
+            <Button x:Name="ExportButton" Content="선택한 파츠 내보내기" Click="OnExportClick" IsEnabled="False"/>
+            <TextBlock x:Name="StatusText" VerticalAlignment="Center"/>
+        </StackPanel>
+    </Grid>
+</Window>
