@@ -1,5 +1,5 @@
+using System;
 using System.Collections.Generic;
-using SkiaSharp;
 
 namespace asset_tool
 {
@@ -9,77 +9,73 @@ namespace asset_tool
         {
             public int X;
             public int Y;
-            public int Width;
-            public int Height;
-            public SKBitmap Image = null!;
+            public RgbaImage Image = null!;
         }
 
         // Finds connected blobs of non-transparent pixels (8-connectivity) and
         // crops each one out, masking away any other blob's pixels that fall
         // inside the same bounding box.
-        public static List<Part> Split(SKBitmap source, byte alphaThreshold = 10, int minPixelCount = 4)
+        public static List<Part> Split(RgbaImage source, byte alphaThreshold = 10, int minPixelCount = 4)
         {
             int w = source.Width;
             int h = source.Height;
-
-            var alpha = new byte[w * h];
-            for (int y = 0; y < h; y++)
-                for (int x = 0; x < w; x++)
-                    alpha[y * w + x] = source.GetPixel(x, y).Alpha;
+            var px = source.Pixels;
 
             var visited = new bool[w * h];
             var results = new List<Part>();
-            var stack = new Stack<(int x, int y)>();
+            var stack = new Stack<int>();
+            var pixels = new List<int>();
 
-            for (int y = 0; y < h; y++)
+            for (int start = 0; start < w * h; start++)
             {
-                for (int x = 0; x < w; x++)
+                if (visited[start] || px[start * 4 + 3] < alphaThreshold)
+                    continue;
+
+                pixels.Clear();
+                int minX = start % w, maxX = minX, minY = start / w, maxY = minY;
+
+                visited[start] = true;
+                stack.Push(start);
+
+                while (stack.Count > 0)
                 {
-                    int idx = y * w + x;
-                    if (visited[idx] || alpha[idx] < alphaThreshold)
-                        continue;
+                    int idx = stack.Pop();
+                    pixels.Add(idx);
+                    int cx = idx % w, cy = idx / w;
+                    if (cx < minX) minX = cx;
+                    if (cx > maxX) maxX = cx;
+                    if (cy < minY) minY = cy;
+                    if (cy > maxY) maxY = cy;
 
-                    var pixels = new List<(int x, int y)>();
-                    int minX = x, maxX = x, minY = y, maxY = y;
-
-                    visited[idx] = true;
-                    stack.Push((x, y));
-
-                    while (stack.Count > 0)
+                    for (int dy = -1; dy <= 1; dy++)
                     {
-                        var (cx, cy) = stack.Pop();
-                        pixels.Add((cx, cy));
-                        if (cx < minX) minX = cx;
-                        if (cx > maxX) maxX = cx;
-                        if (cy < minY) minY = cy;
-                        if (cy > maxY) maxY = cy;
-
-                        for (int dy = -1; dy <= 1; dy++)
+                        int ny = cy + dy;
+                        if (ny < 0 || ny >= h) continue;
+                        for (int dx = -1; dx <= 1; dx++)
                         {
-                            for (int dx = -1; dx <= 1; dx++)
-                            {
-                                if (dx == 0 && dy == 0) continue;
-                                int nx = cx + dx, ny = cy + dy;
-                                if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
-                                int nidx = ny * w + nx;
-                                if (visited[nidx] || alpha[nidx] < alphaThreshold) continue;
-                                visited[nidx] = true;
-                                stack.Push((nx, ny));
-                            }
+                            int nx = cx + dx;
+                            if ((dx == 0 && dy == 0) || nx < 0 || nx >= w) continue;
+                            int nidx = ny * w + nx;
+                            if (visited[nidx] || px[nidx * 4 + 3] < alphaThreshold) continue;
+                            visited[nidx] = true;
+                            stack.Push(nidx);
                         }
                     }
-
-                    if (pixels.Count < minPixelCount) continue;
-
-                    int pw = maxX - minX + 1;
-                    int ph = maxY - minY + 1;
-                    var cropped = new SKBitmap(pw, ph, source.ColorType, source.AlphaType);
-
-                    foreach (var (px, py) in pixels)
-                        cropped.SetPixel(px - minX, py - minY, source.GetPixel(px, py));
-
-                    results.Add(new Part { X = minX, Y = minY, Width = pw, Height = ph, Image = cropped });
                 }
+
+                if (pixels.Count < minPixelCount) continue;
+
+                int pw = maxX - minX + 1;
+                int ph = maxY - minY + 1;
+                var cropped = new RgbaImage(pw, ph);
+
+                foreach (var idx in pixels)
+                {
+                    int x = idx % w - minX, y = idx / w - minY;
+                    Buffer.BlockCopy(px, idx * 4, cropped.Pixels, (y * pw + x) * 4, 4);
+                }
+
+                results.Add(new Part { X = minX, Y = minY, Image = cropped });
             }
 
             results.Sort((a, b) => a.Y != b.Y ? a.Y - b.Y : a.X - b.X);

@@ -8,6 +8,18 @@
         Width="1400" Height="900"
         WindowStartupLocation="CenterScreen"
         Title="Spine Part Splitter">
+    <Window.Resources>
+        <!-- Mid-gray checkerboard: white fx strokes AND dark shadows both stay visible. -->
+        <DrawingBrush x:Key="CheckerBrush" TileMode="Tile" DestinationRect="0,0,16,16" Stretch="None">
+            <DrawingBrush.Drawing>
+                <DrawingGroup>
+                    <GeometryDrawing Brush="#A8A8A8" Geometry="M0,0 H16 V16 H0 Z"/>
+                    <GeometryDrawing Brush="#868686" Geometry="M0,0 H8 V8 H0 Z M8,8 H16 V16 H8 Z"/>
+                </DrawingGroup>
+            </DrawingBrush.Drawing>
+        </DrawingBrush>
+    </Window.Resources>
+
     <Grid RowDefinitions="Auto,*,Auto" Margin="10">
         <StackPanel Grid.Row="0" Orientation="Vertical" Spacing="6" Margin="0,0,0,10">
             <StackPanel Orientation="Horizontal" Spacing="10">
@@ -18,53 +30,91 @@
                 <TextBlock x:Name="AtlasPathText" VerticalAlignment="Center" Text="(아틀라스 없음)"/>
                 <Button x:Name="AtlasSplitButton" Content="아틀라스로 분리" Click="OnAtlasSplitClick" IsEnabled="False"/>
             </StackPanel>
+
             <StackPanel Orientation="Horizontal" Spacing="10">
-                <CheckBox x:Name="CutoutCheckBox" Content="가장자리 배경 자동 제거 (누끼)" IsChecked="True"/>
-                <TextBlock Text="허용 오차:" VerticalAlignment="Center"/>
-                <TextBox x:Name="CutoutToleranceBox" Text="100" Width="50"/>
-                <CheckBox x:Name="IslandCheckBox" Content="내부에 작게 낀 다른 파츠 제거 (비슷한 크기 덩어리는 유지)" IsChecked="True"/>
+                <CheckBox x:Name="OverlapCheckBox" IsChecked="True"
+                          Content="겹친 리전에 끼어든 옆 파츠 제거 (아틀라스 좌표 기준 · 노트/캐릭터 공통)"
+                          ToolTip.Tip="리전 사각형끼리 겹칠 때만 동작합니다. 겹침이 없는 아틀라스(대부분의 노트)는 원본 그대로 잘라냅니다."/>
+                <CheckBox x:Name="RestoreOrigCheckBox" Content="잘린 여백 복원 (orig/offset)"
+                          ToolTip.Tip="패킹할 때 잘려 나간 투명 여백을 되살려 원본 이미지 크기로 저장합니다. Spine에서 다시 패킹할 때 유용합니다."/>
+                <TextBlock Text="파일 이름:" VerticalAlignment="Center"/>
+                <ComboBox x:Name="NamingComboBox" SelectedIndex="0" MinWidth="200">
+                    <ComboBoxItem Content="폴더 구조 유지 (0103/images_air/fx)"/>
+                    <ComboBoxItem Content="폴더를 _로 연결 (0103_images_air_fx)"/>
+                    <ComboBoxItem Content="마지막 이름만 (fx)"/>
+                </ComboBox>
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal" Spacing="10">
+                <CheckBox x:Name="CutoutCheckBox" Content="색 기반 가장자리 누끼 (구버전)"
+                          ToolTip.Tip="모서리 색과 비슷한 픽셀을 지웁니다. 아틀라스와 PNG가 서로 안 맞을 때만 쓰세요. 정상 아틀라스에서는 파츠 일부가 지워질 수 있습니다."/>
+                <TextBlock Text="허용 오차:" VerticalAlignment="Center"
+                           IsEnabled="{Binding #CutoutCheckBox.IsChecked}"/>
+                <NumericUpDown x:Name="CutoutToleranceBox" Value="100" Minimum="0" Maximum="255" Increment="5"
+                               FormatString="0" Width="120"
+                               IsEnabled="{Binding #CutoutCheckBox.IsChecked}"/>
+                <CheckBox x:Name="IslandCheckBox" Content="안쪽의 작은 다른 색 덩어리 제거 (동공·하이라이트도 지워질 수 있음)"
+                          IsEnabled="{Binding #CutoutCheckBox.IsChecked}"/>
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal" Spacing="10">
+                <Button x:Name="BatchButton" Content="폴더 일괄 처리..." Click="OnBatchClick"
+                        ToolTip.Tip="폴더 안의 모든 .atlas를 찾아 PNG를 자동으로 짝지어 분리합니다 (TextAsset / Texture2D 처럼 따로 있어도 됨)."/>
+                <Button x:Name="CancelBatchButton" Content="취소" Click="OnCancelBatchClick" IsEnabled="False"/>
+                <CheckBox x:Name="CopyUnusedCheckBox" IsChecked="True" Content="아틀라스에 안 쓰인 PNG도 복사 (예: 0102 롱노트)"/>
+                <ProgressBar x:Name="BatchProgressBar" Width="260" Minimum="0" Maximum="1" Value="0" VerticalAlignment="Center"/>
+                <TextBlock x:Name="BatchProgressText" VerticalAlignment="Center" Foreground="Gray"/>
             </StackPanel>
         </StackPanel>
 
-        <Grid Grid.Row="1" ColumnDefinitions="*,320">
-            <Border Grid.Column="0" BorderBrush="Gray" BorderThickness="1">
-                <ScrollViewer>
-                    <Image x:Name="PreviewImage" Stretch="Uniform"/>
-                </ScrollViewer>
-            </Border>
+        <Grid Grid.Row="1" ColumnDefinitions="*,360">
+            <TabControl x:Name="LeftTabs" Grid.Column="0" Padding="0">
+                <TabItem Header="미리보기" FontSize="15">
+                    <Border BorderBrush="Gray" BorderThickness="1" Background="{StaticResource CheckerBrush}">
+                        <ScrollViewer>
+                            <Image x:Name="PreviewImage" Stretch="Uniform"/>
+                        </ScrollViewer>
+                    </Border>
+                </TabItem>
+                <TabItem x:Name="LogTab" Header="일괄 처리 로그" FontSize="15">
+                    <TextBox x:Name="LogBox" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
+                             FontFamily="Consolas, D2Coding, monospace" FontSize="12"/>
+                </TabItem>
+            </TabControl>
 
             <Border Grid.Column="1" BorderBrush="Gray" BorderThickness="1" Margin="10,0,0,0">
                 <Grid RowDefinitions="Auto,*">
-                    <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="6" Margin="6" >
+                    <StackPanel Grid.Row="0" Orientation="Horizontal" Spacing="6" Margin="6">
                         <Button x:Name="SelectAllButton" Content="전체 선택" Click="OnSelectAllClick"/>
                         <Button x:Name="DeselectAllButton" Content="전체 해제" Click="OnDeselectAllClick"/>
                         <TextBlock x:Name="SelectionCountText" VerticalAlignment="Center" Foreground="Gray"/>
                     </StackPanel>
-                    <ScrollViewer Grid.Row="1">
-                        <ItemsControl x:Name="PartsList">
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate x:DataType="local:PartItem">
-                                    <Border BorderBrush="LightGray" BorderThickness="0,0,0,1" Padding="6">
-                                        <StackPanel Orientation="Horizontal" Spacing="8">
-                                            <CheckBox IsChecked="{Binding Include, Mode=TwoWay}" VerticalAlignment="Center"/>
-                                            <Image Source="{Binding Thumbnail}" Width="48" Height="48" Stretch="Uniform" VerticalAlignment="Center"/>
-                                            <StackPanel VerticalAlignment="Center">
-                                                <TextBox Text="{Binding Name, Mode=TwoWay}" Width="190"/>
-                                                <TextBlock Text="{Binding SizeText}" FontSize="10" Foreground="Gray"/>
-                                            </StackPanel>
-                                        </StackPanel>
+                    <ListBox x:Name="PartsList" Grid.Row="1">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate x:DataType="local:PartItem">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <CheckBox IsChecked="{Binding Include, Mode=TwoWay}" VerticalAlignment="Center"/>
+                                    <Border Width="52" Height="52" Background="{StaticResource CheckerBrush}" VerticalAlignment="Center">
+                                        <Image Source="{Binding Thumbnail}" Width="48" Height="48" Stretch="Uniform"/>
                                     </Border>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
-                    </ScrollViewer>
+                                    <StackPanel VerticalAlignment="Center" Spacing="2">
+                                        <TextBox Text="{Binding Name, Mode=TwoWay}" Width="210"/>
+                                        <TextBlock Text="{Binding SizeText}" FontSize="10" Foreground="Gray"
+                                                   TextWrapping="Wrap" MaxWidth="210"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
                 </Grid>
             </Border>
         </Grid>
 
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="10" Margin="0,10,0,0">
-            <Button x:Name="ExportButton" Content="선택한 파츠 내보내기" Click="OnExportClick" IsEnabled="False"/>
-            <TextBlock x:Name="StatusText" VerticalAlignment="Center"/>
-        </StackPanel>
+        <Grid Grid.Row="2" ColumnDefinitions="Auto,*" Margin="0,10,0,0">
+            <Button x:Name="ExportButton" Grid.Column="0" Content="선택한 파츠 내보내기" Click="OnExportClick"
+                    IsEnabled="False" VerticalAlignment="Top"/>
+            <SelectableTextBlock x:Name="StatusText" Grid.Column="1" Margin="10,0,0,0"
+                                 VerticalAlignment="Center" TextWrapping="Wrap"/>
+        </Grid>
     </Grid>
 </Window>
