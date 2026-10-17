@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -45,6 +45,38 @@ namespace asset_tool
             return pngsByName.TryGetValue(Path.GetFileName(imageFile), out var candidates)
                 ? PickClosest(atlasDir, candidates)
                 : null;
+        }
+
+        // A texture can exist twice under one name (AssetStudio keeps both and renames
+        // the clash to "name_#123.png"; which of the two keeps the plain name varies from
+        // run to run). They are different pictures - e.g. a white silhouette and its
+        // pink-glow version - and nothing in the files says which one the atlas means.
+        // Returns `primary` plus every same-folder "<name>_#<digits>" sibling with
+        // different content, ordered by content hash so the order never depends on
+        // extraction order. Identical copies are dropped.
+        public static List<string> FindVariants(string primary)
+        {
+            var dir = Path.GetDirectoryName(primary) ?? "";
+            var stem = Path.GetFileNameWithoutExtension(primary);
+            var ext = Path.GetExtension(primary);
+            var pattern = new System.Text.RegularExpressions.Regex(
+                "^" + System.Text.RegularExpressions.Regex.Escape(stem) + @"_#\d+" + System.Text.RegularExpressions.Regex.Escape(ext) + "$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            var files = new List<string> { primary };
+            try
+            {
+                files.AddRange(Directory.EnumerateFiles(dir).Where(f => pattern.IsMatch(Path.GetFileName(f))));
+            }
+            catch (Exception) { /* unreadable folder: just the primary */ }
+
+            var byHash = new SortedDictionary<string, string>(StringComparer.Ordinal);
+            foreach (var f in files)
+            {
+                var hash = Convert.ToHexString(System.Security.Cryptography.MD5.HashData(File.ReadAllBytes(f)));
+                if (!byHash.ContainsKey(hash)) byHash[hash] = f;
+            }
+            return byHash.Values.ToList();
         }
 
         private static string? PickClosest(string atlasDir, List<string> candidates)

@@ -1,4 +1,4 @@
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using ModelContextProtocol.Server;
 
 namespace asset_tool.Mcp;
@@ -52,7 +52,9 @@ public static class AssetTools
     [Description("Split every Spine .atlas under a folder into per-part PNGs. Atlas page PNGs are matched " +
                  "automatically (e.g. TextAsset\\x paired with Texture2D\\x from an AssetStudio export). " +
                  "Output goes to <outputDir>\\<atlas folder relative to input>\\<atlas name>\\<region>.png and a " +
-                 "_split_log.txt. A failing atlas is logged and skipped. Existing files in outputDir may be overwritten.")]
+                 "_split_log.txt. A failing atlas is logged and skipped. Existing files in outputDir may be overwritten. " +
+                 "If one page name matches several different textures (same name, different picture), every one is split: " +
+                 "the first into the normal folder, the others into <name>_v2, <name>_v3 - check the log for which atlases this affects.")]
     public static async Task<object> SplitAtlasFolder(
         [Description("Folder to scan recursively for .atlas / .atlas.txt and PNG files.")] string inputDir,
         [Description("Output folder. Must differ from inputDir; may be inside it (output is never re-processed).")] string outputDir,
@@ -61,6 +63,8 @@ public static class AssetTools
         [Description("Restore whitespace trimmed at packing time using orig/offset, so parts have original size.")] bool restoreOriginalSize = false,
         [Description("Remove pixels of neighbouring parts that leak into overlapping polygon-packed regions. Default true.")] bool removeOverlapLeaks = true,
         [Description("Copy PNGs that no atlas refers to (e.g. long-note textures) as-is. Default true.")] bool copyUnusedPngs = true,
+        [Description("Drop the atlas's source folder from the output path: <outputDir>/<atlas name>/<region>.png, " +
+                     "the layout Spine's image-folder import expects. Same-named atlases get _2, _3. Stray PNGs go to _unused_pngs. Default false.")] bool flattenFolders = false,
         CancellationToken cancellationToken = default)
     {
         if (!Directory.Exists(inputDir))
@@ -80,6 +84,7 @@ public static class AssetTools
         {
             Naming = mode,
             CopyUnusedPngs = copyUnusedPngs,
+            FlattenFolders = flattenFolders,
             Extract = new ExtractOptions
             {
                 RemoveOverlapLeaks = removeOverlapLeaks,
@@ -241,13 +246,15 @@ public static class BundleTools
 
     [McpServerTool(Name = "extract_and_split", Destructive = false, Idempotent = true)]
     [Description("One-shot pipeline: extract Texture2D + TextAsset from Unity bundles, then split every Spine atlas " +
-                 "into per-part PNGs. Writes <workDir>/extracted and <workDir>/parts (parts mirror <bundle name>/<atlas>/<region>.png).")]
+                 "into per-part PNGs. Writes <workDir>/extracted and <workDir>/parts. By default parts are laid out as " +
+                 "<workDir>/parts/<atlas name>/<region>.png (flattenFolders=true); set it false to mirror <bundle>/<folder>/<atlas>/<region>.png.")]
     public static async Task<object> ExtractAndSplit(
         [Description("A bundle file, or a folder containing bundles.")] string inputPath,
         [Description("Working folder; 'extracted' and 'parts' are created inside it.")] string workDir,
         [Description("Optional CLI --filter-by-name text.")] string? filterByName = null,
         [Description("Naming for parts: keep_folders (default), flatten or leaf_only.")] string naming = "keep_folders",
         [Description("Path to AssetStudioModCLI.exe. Defaults to the ASSETSTUDIO_CLI environment variable.")] string? cliPath = null,
+        [Description("Lay parts out as <atlas name>/<region>.png without bundle/CAB folders (Spine image-folder style). Default true.")] bool flattenFolders = true,
         CancellationToken cancellationToken = default)
     {
         var extractedDir = Path.Combine(workDir, "extracted");
@@ -258,7 +265,7 @@ public static class BundleTools
         if (extraction is not { } e || !IsOk(e))
             return new { ok = false, stage = "extract", extraction };
 
-        var split = await AssetTools.SplitAtlasFolder(extractedDir, partsDir, naming, cancellationToken: cancellationToken);
+        var split = await AssetTools.SplitAtlasFolder(extractedDir, partsDir, naming, flattenFolders: flattenFolders, cancellationToken: cancellationToken);
         return new { ok = IsOk(split), stage = "split", extraction, split };
     }
 
