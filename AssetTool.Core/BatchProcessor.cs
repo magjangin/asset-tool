@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -184,7 +184,7 @@ namespace asset_tool
                 if (page.Width > 0 && page.Height > 0 && (page.Width != image.Width || page.Height != image.Height))
                 {
                     summary.Warnings++;
-                    notes.Add($"{page.ImageFile} 크기가 아틀라스({page.Width}x{page.Height})와 PNG({image.Width}x{image.Height})에서 다름");
+                    notes.Add($"{page.ImageFile} 크기가 아틀라스({page.Width}x{page.Height})와 PNG({image.Width}x{image.Height})에서 다름 → 아틀라스 크기로 보정해 처리 (화질이 약간 떨어질 수 있음)");
                 }
 
                 var extraction = AtlasExtractor.ExtractPage(image, page, options.Extract);

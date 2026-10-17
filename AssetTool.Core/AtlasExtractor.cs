@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 
 namespace asset_tool
 {
@@ -31,12 +31,21 @@ namespace asset_tool
         public List<ExtractedPart> Parts { get; } = new();
         public List<string> SkippedRegions { get; } = new(); // out of the page bounds / empty
         public bool PageHasOverlaps { get; init; }
+        public bool PageWasResized { get; init; } // PNG size differed from the atlas's declared size
     }
 
     public static class AtlasExtractor
     {
         public static PageExtraction ExtractPage(RgbaImage page, AtlasPage atlasPage, ExtractOptions options)
         {
+            // Unity often re-samples textures (e.g. to a power of two), so the exported
+            // PNG no longer matches the atlas coordinates. Scale it back to the size the
+            // atlas describes; otherwise regions fall outside the page and get dropped.
+            bool resized = atlasPage.Width > 0 && atlasPage.Height > 0 &&
+                           (atlasPage.Width != page.Width || atlasPage.Height != page.Height);
+            if (resized)
+                page = page.ResizedTo(atlasPage.Width, atlasPage.Height);
+
             var valid = new List<AtlasRegion>();
             var skipped = new List<string>();
 
@@ -51,7 +60,7 @@ namespace asset_tool
             }
 
             var resolver = options.RemoveOverlapLeaks ? new AtlasOverlapResolver(page, valid) : null;
-            var result = new PageExtraction { PageHasOverlaps = resolver?.HasOverlaps ?? false };
+            var result = new PageExtraction { PageHasOverlaps = resolver?.HasOverlaps ?? false, PageWasResized = resized };
             result.SkippedRegions.AddRange(skipped);
 
             foreach (var region in valid)
