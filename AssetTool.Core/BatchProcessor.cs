@@ -198,6 +198,12 @@ namespace asset_tool
                     if (part.OverlapPixelsRemoved > 0) atlasCleaned++;
                 }
 
+                if (extraction.KeptUncleanedRegions.Count > 0)
+                {
+                    summary.Warnings++;
+                    notes.Add($"겹침 정리 시 통째로 사라질 리전은 정리 없이 그대로 사용: {string.Join(", ", extraction.KeptUncleanedRegions)}");
+                }
+
                 if (extraction.SkippedRegions.Count > 0)
                 {
                     summary.Warnings++;
