@@ -31,6 +31,7 @@ namespace asset_tool
         public List<ExtractedPart> Parts { get; } = new();
         public List<string> SkippedRegions { get; } = new(); // out of the page bounds / empty
         public bool PageHasOverlaps { get; init; }
+        public List<string> KeptUncleanedRegions { get; } = new(); // overlap cleaning would have emptied them
         public bool PageWasResized { get; init; } // PNG size differed from the atlas's declared size
     }
 
@@ -68,7 +69,18 @@ namespace asset_tool
                 var crop = page.Crop(region.X, region.Y, region.PackedWidth, region.PackedHeight);
 
                 // Leak removal works in page coordinates, so it runs before rotating.
+                int visibleBefore = resolver is null ? 0 : crop.CountVisiblePixels();
                 int overlapRemoved = resolver?.RemoveForeignPixels(region, crop) ?? 0;
+
+                // A region must never vanish: if cleaning wiped out everything that was
+                // there (e.g. a small part sitting inside a bigger region's rectangle whose
+                // ownership got lost to a neighbour), keep the uncleaned crop instead.
+                if (overlapRemoved > 0 && visibleBefore > 0 && crop.CountVisiblePixels() == 0)
+                {
+                    crop = page.Crop(region.X, region.Y, region.PackedWidth, region.PackedHeight);
+                    overlapRemoved = 0;
+                    result.KeptUncleanedRegions.Add(region.ExportName);
+                }
 
                 var image = region.RotateDegrees != 0 ? crop.RotateClockwise(region.RotateDegrees) : crop;
 
