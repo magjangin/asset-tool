@@ -115,6 +115,7 @@ public static class AssetTools
                 failures = summary.Failures,
                 outputDir = Path.GetFullPath(outputDir),
                 logPath = summary.LogPath,
+                skinSkeletons = summary.SkinSkeletons,
                 problems
             };
         }
@@ -344,11 +345,15 @@ public static class BundleTools
                 rawFiles = Directory.EnumerateFiles(rawDir, "*", SearchOption.AllDirectories).Count(),
                 warnings = Prop<int>(split, "warnings"),
                 failures = Prop<int>(split, "failures"),
-                splitLog = Prop<string>(split, "logPath")
+                splitLog = Prop<string>(split, "logPath"),
+                skinSkeletons = Prop<List<string>>(split, "skinSkeletons") ?? new List<string>()
             });
         }
 
-        return new { ok = allOk, workDir = Path.GetFullPath(workDir), bundleCount = bundles.Length, bundles = results };
+        var skinCount = results.Sum(r => Prop<List<string>>(r, "skinSkeletons")?.Count ?? 0);
+        string? skinNotice = skinCount == 0 ? null :
+            $"기본 외 스킨이 있는 스켈레톤이 {skinCount}개 있습니다. Spine에서 몸통 같은 부위가 비어 보이면 스킨을 선택해 보세요 (목록은 번들별 skinSkeletons, 자세한 슬롯은 각 _split_log.txt).";
+        return new { ok = allOk, workDir = Path.GetFullPath(workDir), bundleCount = bundles.Length, skinNotice, bundles = results };
     }
 
     private static int CountFiles(object result, string extension) =>

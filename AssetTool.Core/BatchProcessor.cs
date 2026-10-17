@@ -37,6 +37,8 @@ namespace asset_tool
         public int Failures;
         public int CopiedPngs;
         public string LogPath = "";
+        // .skel files (relative to the input) that define skins besides "default".
+        public List<string> SkinSkeletons = new();
     }
 
     // Walks a folder tree (e.g. an AssetStudio export with TextAsset\ and
@@ -146,6 +148,8 @@ namespace asset_tool
                 done++;
                 progress?.Report(new BatchProgress(done, total, null));
             }
+
+            ReportSkins(files.Where(f => f.EndsWith(".skel", StringComparison.OrdinalIgnoreCase)), inputRoot, summary, Log, ct);
 
             Log("");
             Log($"완료: 아틀라스 {summary.Atlases}개 / 페이지 {summary.Pages}개 / 파츠 {summary.Parts}개" +
@@ -292,6 +296,41 @@ namespace asset_tool
             log($"  {relAtlas} → {atlasParts}개{cleanedNote}");
             foreach (var note in notes)
                 log($"      ! {note}");
+        }
+
+        // A skeleton with extra skins shows some slots empty in an editor until one of
+        // those skins is picked, which looks like missing parts. Say so in the log.
+        private static void ReportSkins(IEnumerable<string> skelPaths, string inputRoot, BatchSummary summary,
+                                        Action<string> log, CancellationToken ct)
+        {
+            var found = new List<string>();
+            int unreadable = 0;
+            foreach (var skel in skelPaths.OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+            {
+                ct.ThrowIfCancellationRequested();
+                var info = SkelSkinReader.TryRead(skel);
+                if (info is null) { unreadable++; continue; }
+                if (info.ExtraSkins.Count == 0) continue;
+
+                var rel = Path.GetRelativePath(inputRoot, skel);
+                var names = string.Join(", ", info.ExtraSkins.Select(s => s.Name));
+                var line = $"  {rel}: 스킨 {names}";
+                if (info.SlotsOnlyInExtraSkins.Count > 0)
+                    line += $" / 기본 스킨에는 없고 이 스킨에만 있는 슬롯: {string.Join(", ", info.SlotsOnlyInExtraSkins)}";
+                found.Add(line);
+                summary.SkinSkeletons.Add(rel);
+            }
+
+            if (found.Count == 0 && unreadable == 0) return;
+            log("");
+            if (found.Count > 0)
+            {
+                summary.Warnings++;
+                log($"! 기본 외 스킨이 있는 스켈레톤 {found.Count}개 - Spine에서 몸통 같은 부위가 비어 보이면 스킨을 선택해 보세요:");
+                foreach (var line in found) log(line);
+            }
+            if (unreadable > 0)
+                log($"  (Spine 3.8 형식이 아니거나 읽지 못한 .skel {unreadable}개는 스킨을 확인하지 못함)");
         }
 
         // "foo.atlas" -> "foo", "foo.atlas.txt" -> "foo"
