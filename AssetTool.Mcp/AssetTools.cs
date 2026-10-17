@@ -159,3 +159,110 @@ public static class AssetTools
         }
     }
 }
+
+// Wrappers around the AssetStudioMod CLI (https://github.com/aelurum/AssetStudio)
+// so one request can go from Unity bundles to split parts.
+[McpServerToolType]
+public static class BundleTools
+{
+    private const string CliEnvVar = "ASSETSTUDIO_CLI";
+
+    [McpServerTool(Name = "extract_unity_bundles", Destructive = false, Idempotent = true)]
+    [Description("Extract assets (default: Texture2D PNGs and TextAssets such as .atlas/.skel) from Unity asset bundle " +
+                 "files using the AssetStudioMod CLI. Accepts one bundle file or a folder of bundles. " +
+                 "With groupBy='fileName' each bundle gets its own subfolder, so same-named assets from different bundles never collide.")]
+    public static async Task<object> ExtractUnityBundles(
+        [Description("A bundle file, or a folder containing bundles.")] string inputPath,
+        [Description("Folder to extract into (created if missing).")] string outputDir,
+        [Description("Comma-separated asset types for the CLI's -t option. Default 'tex2d,textAsset'.")] string assetTypes = "tex2d,textAsset",
+        [Description("CLI -g option: none, type, container, containerFull, fileName, sceneHierarchy. Default 'fileName'.")] string groupBy = "fileName",
+        [Description("Optional CLI --filter-by-name text, e.g. a character id.")] string? filterByName = null,
+        [Description("Path to AssetStudioModCLI.exe. Defaults to the ASSETSTUDIO_CLI environment variable.")] string? cliPath = null,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (!File.Exists(inputPath) && !Directory.Exists(inputPath))
+                return new { ok = false, error = $"입력이 없습니다: {inputPath}" };
+
+            var cli = cliPath ?? Environment.GetEnvironmentVariable(CliEnvVar);
+            if (string.IsNullOrWhiteSpace(cli) || !File.Exists(cli))
+                return new { ok = false, error = $"AssetStudioModCLI.exe를 찾을 수 없습니다. cliPath를 주거나 환경변수 {CliEnvVar}를 설정하세요." };
+
+            Directory.CreateDirectory(outputDir);
+            var psi = new System.Diagnostics.ProcessStartInfo(cli)
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            foreach (var a in new[] { Path.GetFullPath(inputPath), "-t", assetTypes, "-g", groupBy,
+                                      "-o", Path.GetFullPath(outputDir), "--log-level", "warning" })
+                psi.ArgumentList.Add(a);
+            if (!string.IsNullOrWhiteSpace(filterByName))
+            {
+                psi.ArgumentList.Add("--filter-by-name");
+                psi.ArgumentList.Add(filterByName);
+            }
+
+            using var proc = System.Diagnostics.Process.Start(psi)!;
+            var stdout = proc.StandardOutput.ReadToEndAsync(cancellationToken);
+            var stderr = proc.StandardError.ReadToEndAsync(cancellationToken);
+            try { await proc.WaitForExitAsync(cancellationToken); }
+            catch (OperationCanceledException) { try { proc.Kill(true); } catch { } throw; }
+
+            var outText = await stdout;
+            var errText = await stderr;
+            var files = Directory.EnumerateFiles(outputDir, "*", SearchOption.AllDirectories)
+                                 .GroupBy(f => Path.GetExtension(f).ToLowerInvariant())
+                                 .ToDictionary(g => g.Key.Length == 0 ? "(none)" : g.Key, g => g.Count());
+            // The CLI prints \r-separated progress; keep only the last meaningful chunk.
+            static string Tail(string s) { s = s.Trim(); return s.Length <= 600 ? s : s[^600..]; }
+            return new
+            {
+                ok = proc.ExitCode == 0,
+                exitCode = proc.ExitCode,
+                outputDir = Path.GetFullPath(outputDir),
+                fileCountsByExtension = files,
+                stdoutTail = Tail(outText),
+                stderrTail = Tail(errText)
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            return new { ok = false, error = "취소되었습니다." };
+        }
+        catch (Exception ex)
+        {
+            return new { ok = false, error = ex.Message };
+        }
+    }
+
+    [McpServerTool(Name = "extract_and_split", Destructive = false, Idempotent = true)]
+    [Description("One-shot pipeline: extract Texture2D + TextAsset from Unity bundles, then split every Spine atlas " +
+                 "into per-part PNGs. Writes <workDir>/extracted and <workDir>/parts (parts mirror <bundle name>/<atlas>/<region>.png).")]
+    public static async Task<object> ExtractAndSplit(
+        [Description("A bundle file, or a folder containing bundles.")] string inputPath,
+        [Description("Working folder; 'extracted' and 'parts' are created inside it.")] string workDir,
+        [Description("Optional CLI --filter-by-name text.")] string? filterByName = null,
+        [Description("Naming for parts: keep_folders (default), flatten or leaf_only.")] string naming = "keep_folders",
+        [Description("Path to AssetStudioModCLI.exe. Defaults to the ASSETSTUDIO_CLI environment variable.")] string? cliPath = null,
+        CancellationToken cancellationToken = default)
+    {
+        var extractedDir = Path.Combine(workDir, "extracted");
+        var partsDir = Path.Combine(workDir, "parts");
+
+        var extraction = await ExtractUnityBundles(inputPath, extractedDir, filterByName: filterByName,
+                                                   cliPath: cliPath, cancellationToken: cancellationToken);
+        if (extraction is not { } e || !IsOk(e))
+            return new { ok = false, stage = "extract", extraction };
+
+        var split = await AssetTools.SplitAtlasFolder(extractedDir, partsDir, naming, cancellationToken: cancellationToken);
+        return new { ok = IsOk(split), stage = "split", extraction, split };
+    }
+
+    // Tool results are anonymous objects; read their "ok" flag reflectively.
+    private static bool IsOk(object result) =>
+        result.GetType().GetProperty("ok")?.GetValue(result) is true;
+}

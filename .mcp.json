@@ -2,7 +2,10 @@
   "mcpServers": {
     "asset-tool": {
       "command": "AssetTool.Mcp/bin/Debug/net10.0/asset-tool-mcp.exe",
-      "args": []
+      "args": [],
+      "env": {
+        "ASSETSTUDIO_CLI": "H:\\AssetStudioMod.v0.19.0\\cli\\AssetStudioModCLI_net9_win64\\AssetStudioModCLI.exe"
+      }
     }
   }
 }
