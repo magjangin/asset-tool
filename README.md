@@ -81,7 +81,7 @@ stdio로 동작하며, 저장소 루트의 `.mcp.json`에 등록되어 있습니
 | `split_atlas_folder` | 폴더 안의 모든 아틀라스를 파츠 PNG로 분리합니다(폴더 일괄 처리와 같음). |
 | `split_png_by_alpha` | 아틀라스가 없는 PNG 한 장을 알파 덩어리로 분리합니다. |
 | `extract_unity_bundles` | Unity 번들에서 Texture2D·TextAsset을 AssetStudioMod CLI로 추출합니다(번들별 하위 폴더). |
-| `extract_and_split` | 번들 추출부터 파츠 분리까지 한 번에 처리합니다. 번들마다 `파츠\`(아틀라스 이름별 파츠), `스프라이트\`(아틀라스 없는 낱개 이미지: 롱노트·콜라보 스킨 노트·히트 포인트·배경 등), `원본\`(파츠와 같은 하위 폴더 이름: 아틀라스마다 `.atlas`, 페이지 PNG, 그 아틀라스를 쓰는 `.skel`) 폴더를 만들고, `스켈_짝맞춤.csv`에 스켈을 어느 폴더에 넣은 근거를 적습니다. |
+| `extract_and_split` | 번들 추출부터 파츠 분리까지 한 번에 처리합니다. 번들마다 `파츠\`(아틀라스 이름별 파츠), `스프라이트\`(아틀라스 없는 낱개 이미지: 롱노트·콜라보 스킨 노트·히트 포인트·배경 등), `원본\`(`.atlas`, `.skel`, 페이지 PNG) 폴더를 만듭니다. |
 | `repack_parts` | 파츠 PNG 폴더를 다시 Spine/libgdx 아틀라스(`.atlas` + 페이지 PNG)로 묶습니다. |
 
 번들 추출은 [AssetStudioMod](https://github.com/aelurum/AssetStudio) CLI를 호출합니다. `AssetStudioModCLI.exe` 경로를
