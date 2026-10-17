@@ -205,6 +205,20 @@ namespace asset_tool
                 }
                 var variants = PagePngLocator.FindVariants(found);
                 foreach (var v in variants) usedPngs.Add(v);
+
+                // A same-named texture whose size differs from the atlas page is a
+                // different picture, not a variant of this page. If some candidates match
+                // the declared size exactly, those are the real ones.
+                if (variants.Count > 1 && page.Width > 0 && page.Height > 0)
+                {
+                    var exact = variants.Where(v => PagePngLocator.ReadPngSize(v) == (page.Width, page.Height)).ToList();
+                    if (exact.Count > 0 && exact.Count < variants.Count)
+                    {
+                        notes.Add($"{page.ImageFile}와 이름이 같지만 크기가 아틀라스({page.Width}x{page.Height})와 다른 텍스처 " +
+                                  $"{variants.Count - exact.Count}장은 다른 그림이라 제외");
+                        variants = exact;
+                    }
+                }
                 candidates.Add(variants);
             }
 

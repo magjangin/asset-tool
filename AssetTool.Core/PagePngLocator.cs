@@ -79,6 +79,23 @@ namespace asset_tool
             return byHash.Values.ToList();
         }
 
+        // Width/height straight from the PNG header (no decode); null if it isn't a PNG.
+        public static (int Width, int Height)? ReadPngSize(string path)
+        {
+            try
+            {
+                using var fs = File.OpenRead(path);
+                var header = new byte[24];
+                if (fs.Read(header, 0, 24) < 24) return null;
+                // 8-byte signature, then the IHDR chunk: length(4) "IHDR"(4) width(4) height(4).
+                if (header[0] != 0x89 || header[1] != 0x50 || header[2] != 0x4E || header[3] != 0x47) return null;
+                int w = (header[16] << 24) | (header[17] << 16) | (header[18] << 8) | header[19];
+                int h = (header[20] << 24) | (header[21] << 16) | (header[22] << 8) | header[23];
+                return (w, h);
+            }
+            catch (Exception) { return null; }
+        }
+
         private static string? PickClosest(string atlasDir, List<string> candidates)
         {
             if (candidates.Count == 0) return null;
