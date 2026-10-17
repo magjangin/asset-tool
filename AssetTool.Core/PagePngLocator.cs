@@ -79,16 +79,6 @@ namespace asset_tool
             return byHash.Values.ToList();
         }
 
-        // A same-named texture whose size differs from the atlas page is a different picture,
-        // not a variant of this page. If some candidates match the declared size exactly those
-        // are the real ones; otherwise (e.g. every candidate was re-sampled) keep them all.
-        public static List<string> FilterByPageSize(List<string> variants, int pageWidth, int pageHeight)
-        {
-            if (variants.Count <= 1 || pageWidth <= 0 || pageHeight <= 0) return variants;
-            var exact = variants.Where(v => ReadPngSize(v) == (pageWidth, pageHeight)).ToList();
-            return exact.Count > 0 && exact.Count < variants.Count ? exact : variants;
-        }
-
         // Width/height straight from the PNG header (no decode); null if it isn't a PNG.
         public static (int Width, int Height)? ReadPngSize(string path)
         {
