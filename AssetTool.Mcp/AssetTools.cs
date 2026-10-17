@@ -244,30 +244,118 @@ public static class BundleTools
         }
     }
 
+    private static readonly string[] BundleExtensions = { ".bundle", ".unity3d", ".assetbundle", ".ab" };
+    private const string PartsFolder = "파츠";
+    private const string SpritesFolder = "스프라이트";
+    private const string RawFolder = "원본";
+
     [McpServerTool(Name = "extract_and_split", Destructive = false, Idempotent = true)]
-    [Description("One-shot pipeline: extract Texture2D + TextAsset from Unity bundles, then split every Spine atlas " +
-                 "into per-part PNGs. Writes <workDir>/extracted and <workDir>/parts. By default parts are laid out as " +
-                 "<workDir>/parts/<atlas name>/<region>.png (flattenFolders=true); set it false to mirror <bundle>/<folder>/<atlas>/<region>.png.")]
+    [Description("One-shot pipeline for Unity bundles: extract Texture2D + TextAsset (.atlas/.skel) and Sprites, then split every " +
+                 "Spine atlas into per-part PNGs. layout='by_bundle' (default) writes one folder per bundle: " +
+                 "<workDir>/<bundle>/파츠 (<atlas name>/<region>.png), /스프라이트 (loose sprites: long notes, hit points, backgrounds, skins...) " +
+                 "and /원본 (.atlas, .skel, page PNGs). layout='classic' extracts the whole input into <workDir>/extracted and splits into <workDir>/parts.")]
     public static async Task<object> ExtractAndSplit(
         [Description("A bundle file, or a folder containing bundles.")] string inputPath,
-        [Description("Working folder; 'extracted' and 'parts' are created inside it.")] string workDir,
+        [Description("Working folder; per-bundle folders (or 'extracted' and 'parts' for layout='classic') are created inside it.")] string workDir,
         [Description("Optional CLI --filter-by-name text.")] string? filterByName = null,
         [Description("Naming for parts: keep_folders (default), flatten or leaf_only.")] string naming = "keep_folders",
         [Description("Path to AssetStudioModCLI.exe. Defaults to the ASSETSTUDIO_CLI environment variable.")] string? cliPath = null,
-        [Description("Lay parts out as <atlas name>/<region>.png without bundle/CAB folders (Spine image-folder style). Default true.")] bool flattenFolders = true,
+        [Description("classic layout only: lay parts out as <atlas name>/<region>.png without bundle/CAB folders. Default true.")] bool flattenFolders = true,
+        [Description("'by_bundle' (default) or 'classic'.")] string layout = "by_bundle",
+        [Description("by_bundle layout only: also extract Sprite assets into 스프라이트. Default true.")] bool includeSprites = true,
         CancellationToken cancellationToken = default)
     {
-        var extractedDir = Path.Combine(workDir, "extracted");
-        var partsDir = Path.Combine(workDir, "parts");
+        if (layout is "classic")
+        {
+            var extractedDir = Path.Combine(workDir, "extracted");
+            var partsDir = Path.Combine(workDir, "parts");
 
-        var extraction = await ExtractUnityBundles(inputPath, extractedDir, filterByName: filterByName,
-                                                   cliPath: cliPath, cancellationToken: cancellationToken);
-        if (extraction is not { } e || !IsOk(e))
-            return new { ok = false, stage = "extract", extraction };
+            var extraction = await ExtractUnityBundles(inputPath, extractedDir, filterByName: filterByName,
+                                                       cliPath: cliPath, cancellationToken: cancellationToken);
+            if (!IsOk(extraction))
+                return new { ok = false, stage = "extract", extraction };
 
-        var split = await AssetTools.SplitAtlasFolder(extractedDir, partsDir, naming, flattenFolders: flattenFolders, cancellationToken: cancellationToken);
-        return new { ok = IsOk(split), stage = "split", extraction, split };
+            var split = await AssetTools.SplitAtlasFolder(extractedDir, partsDir, naming, flattenFolders: flattenFolders, cancellationToken: cancellationToken);
+            return new { ok = IsOk(split), stage = "split", extraction, split };
+        }
+        if (layout is not "by_bundle")
+            return new { ok = false, error = "layout은 by_bundle 또는 classic이어야 합니다." };
+
+        if (!File.Exists(inputPath) && !Directory.Exists(inputPath))
+            return new { ok = false, error = $"입력이 없습니다: {inputPath}" };
+
+        var bundles = File.Exists(inputPath)
+            ? new[] { Path.GetFullPath(inputPath) }
+            : Directory.EnumerateFiles(inputPath, "*", SearchOption.AllDirectories)
+                       .Where(f => BundleExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
+                       .OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToArray();
+        if (bundles.Length == 0)
+            return new { ok = false, error = $"번들 파일({string.Join(", ", BundleExtensions)})을 찾지 못했습니다: {inputPath}" };
+
+        var results = new List<object>();
+        var usedLabels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        bool allOk = true;
+
+        foreach (var bundle in bundles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // "gamescene_01_assets_all_<32 hex>.bundle" -> "gamescene_01"
+            var label = System.Text.RegularExpressions.Regex.Replace(
+                Path.GetFileNameWithoutExtension(bundle), "_assets_all_[0-9a-fA-F]{32}$", "");
+            var unique = label;
+            for (int n = 2; !usedLabels.Add(unique); n++) unique = $"{label}_{n}";
+
+            var bundleDir = Path.Combine(workDir, unique);
+            var rawDir = Path.Combine(bundleDir, RawFolder);
+            var partsDir = Path.Combine(bundleDir, PartsFolder);
+            var spritesDir = Path.Combine(bundleDir, SpritesFolder);
+
+            var raw = await ExtractUnityBundles(bundle, rawDir, "tex2d,textAsset", "none", filterByName, cliPath, cancellationToken);
+            if (!IsOk(raw))
+            {
+                allOk = false;
+                results.Add(new { bundle = Path.GetFileName(bundle), folder = unique, ok = false, stage = "extract", detail = raw });
+                continue;
+            }
+
+            object? split = null;
+            if (Directory.EnumerateFiles(rawDir, "*.atlas*", SearchOption.AllDirectories).Any())
+                split = await AssetTools.SplitAtlasFolder(rawDir, partsDir, naming, flattenFolders: true,
+                                                          copyUnusedPngs: false, cancellationToken: cancellationToken);
+
+            int sprites = 0;
+            if (includeSprites)
+            {
+                var sp = await ExtractUnityBundles(bundle, spritesDir, "sprite", "none", filterByName, cliPath, cancellationToken);
+                if (!IsOk(sp)) allOk = false;
+                sprites = CountFiles(sp, ".png");
+            }
+
+            if (split is not null && !IsOk(split)) allOk = false;
+            results.Add(new
+            {
+                bundle = Path.GetFileName(bundle),
+                folder = unique,
+                ok = split is null || IsOk(split),
+                atlases = Prop<int>(split, "atlases"),
+                parts = Prop<int>(split, "parts"),
+                sprites,
+                rawFiles = Directory.EnumerateFiles(rawDir, "*", SearchOption.AllDirectories).Count(),
+                warnings = Prop<int>(split, "warnings"),
+                failures = Prop<int>(split, "failures"),
+                splitLog = Prop<string>(split, "logPath")
+            });
+        }
+
+        return new { ok = allOk, workDir = Path.GetFullPath(workDir), bundleCount = bundles.Length, bundles = results };
     }
+
+    private static int CountFiles(object result, string extension) =>
+        Prop<Dictionary<string, int>>(result, "fileCountsByExtension") is { } d && d.TryGetValue(extension, out var n) ? n : 0;
+
+    private static T? Prop<T>(object? result, string name) =>
+        result?.GetType().GetProperty(name)?.GetValue(result) is T v ? v : default;
 
     // Tool results are anonymous objects; read their "ok" flag reflectively.
     private static bool IsOk(object result) =>
