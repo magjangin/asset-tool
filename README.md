@@ -77,9 +77,11 @@ stdio로 동작하며, 저장소 루트의 `.mcp.json`에 등록되어 있습니
 | `list_atlas_regions` | `.atlas`를 읽어 페이지·리전 목록을 보여 줍니다(아무것도 쓰지 않음). |
 | `split_atlas_folder` | 폴더 안의 모든 아틀라스를 파츠 PNG로 분리합니다(폴더 일괄 처리와 같음). |
 | `split_png_by_alpha` | 아틀라스가 없는 PNG 한 장을 알파 덩어리로 분리합니다. |
+| `extract_unity_bundles` | Unity 번들에서 Texture2D·TextAsset을 AssetStudioMod CLI로 추출합니다(번들별 하위 폴더). |
+| `extract_and_split` | 번들 추출부터 파츠 분리까지 한 번에 처리합니다. |
 
-게임 번들에서의 추출은 이 서버의 범위 밖입니다. [AssetStudioMod](https://github.com/aelurum/AssetStudio) CLI로
-`-t tex2d,textAsset -g type`으로 뽑으면 `TextAsset\`/`Texture2D\` 구조가 되어 `split_atlas_folder`에 그대로 넣을 수 있습니다.
+번들 추출은 [AssetStudioMod](https://github.com/aelurum/AssetStudio) CLI를 호출합니다. `AssetStudioModCLI.exe` 경로를
+환경변수 `ASSETSTUDIO_CLI`(`.mcp.json`의 `env`)나 도구의 `cliPath`로 알려 주세요.
 
 ## 빌드 / 실행
 
