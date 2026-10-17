@@ -70,7 +70,7 @@ Spine의 **폴리곤 패킹**으로 만든 아틀라스(뮤즈대시 캐릭터 �
 ## AI에서 호출하기 (MCP 서버)
 
 같은 로직을 [MCP](https://modelcontextprotocol.io) 서버(`AssetTool.Mcp`)로도 쓸 수 있어서 Claude 같은 AI가 도구로 직접 호출합니다.
-stdio로 동작하며, 저장소 루트의 `.mcp.json`에 등록되어 있습니다(먼저 `dotnet build` 필요).
+stdio로 동작하며, 저장소 루트의 `.mcp.json`에 등록되어 있습니다. 실행 스크립트(`scripts/run-mcp.cmd`)가 서버를 띄울 때마다 먼저 빌드하므로, 코드를 바꾼 뒤에는 Claude Code를 재시작하기만 하면 최신 코드가 적용됩니다.
 
 | 도구 | 하는 일 |
 | --- | --- |
