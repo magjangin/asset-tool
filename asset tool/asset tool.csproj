@@ -18,4 +18,8 @@
     </PackageReference>
     <PackageReference Include="SkiaSharp" Version="3.119.4" />
   </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AssetTool.Core\AssetTool.Core.csproj" />
+  </ItemGroup>
 </Project>

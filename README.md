@@ -67,6 +67,20 @@ Spine의 **폴리곤 패킹**으로 만든 아틀라스(뮤즈대시 캐릭터 �
 
 예전 색 기반 누끼는 모서리가 투명하면 "검정 배경"으로 착각했습니다. 그래서 노트의 `shadow`(어두운 타원) 같은 파츠를 통째로 지웠습니다. 지금은 불투명한 모서리만 기준색으로 쓰도록 고쳤지만, 기본으로는 꺼 두었습니다.
 
+## AI에서 호출하기 (MCP 서버)
+
+같은 로직을 [MCP](https://modelcontextprotocol.io) 서버(`AssetTool.Mcp`)로도 쓸 수 있어서 Claude 같은 AI가 도구로 직접 호출합니다.
+stdio로 동작하며, 저장소 루트의 `.mcp.json`에 등록되어 있습니다(먼저 `dotnet build` 필요).
+
+| 도구 | 하는 일 |
+| --- | --- |
+| `list_atlas_regions` | `.atlas`를 읽어 페이지·리전 목록을 보여 줍니다(아무것도 쓰지 않음). |
+| `split_atlas_folder` | 폴더 안의 모든 아틀라스를 파츠 PNG로 분리합니다(폴더 일괄 처리와 같음). |
+| `split_png_by_alpha` | 아틀라스가 없는 PNG 한 장을 알파 덩어리로 분리합니다. |
+
+게임 번들에서의 추출은 이 서버의 범위 밖입니다. [AssetStudioMod](https://github.com/aelurum/AssetStudio) CLI로
+`-t tex2d,textAsset -g type`으로 뽑으면 `TextAsset\`/`Texture2D\` 구조가 되어 `split_atlas_folder`에 그대로 넣을 수 있습니다.
+
 ## 빌드 / 실행
 
 필요: [.NET 10 SDK](https://dotnet.microsoft.com/download)
@@ -81,6 +95,9 @@ Visual Studio에서는 `asset tool.slnx`를 열면 됩니다.
 
 | 파일 | 역할 |
 | --- | --- |
+| `asset tool/` | Avalonia 데스크톱 앱(화면, `PartItem`) |
+| `AssetTool.Mcp/` | MCP 서버(AI용 도구) |
+| `AssetTool.Core/` | 아래 로직 전부(앱과 MCP가 함께 사용) |
 | `MainWindow.axaml(.cs)` | 화면과 버튼 동작 |
 | `AtlasParser.cs` | `.atlas` 파서 |
 | `AtlasExtractor.cs` | 페이지 하나에서 리전 잘라내기·회전·정리·여백 복원 |

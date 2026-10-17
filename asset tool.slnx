@@ -1,3 +1,5 @@
 <Solution>
+  <Project Path="AssetTool.Core/AssetTool.Core.csproj" />
+  <Project Path="AssetTool.Mcp/AssetTool.Mcp.csproj" />
   <Project Path="asset tool/asset tool.csproj" />
 </Solution>
