@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Runtime.InteropServices;
 using SkiaSharp;
@@ -26,6 +26,49 @@ namespace asset_tool
             Width = width;
             Height = height;
             Pixels = new byte[width * height * 4];
+        }
+
+        // Bilinear resample done on alpha-weighted colors, so transparent pixels
+        // (whose RGB is meaningless) don't bleed dark/white fringes into edges.
+        public RgbaImage ResizedTo(int newWidth, int newHeight)
+        {
+            if (newWidth == Width && newHeight == Height) return this;
+            var dst = new RgbaImage(newWidth, newHeight);
+            double sx = (double)Width / newWidth, sy = (double)Height / newHeight;
+            for (int y = 0; y < newHeight; y++)
+            {
+                double fy = Math.Clamp((y + 0.5) * sy - 0.5, 0, Height - 1);
+                int y0 = (int)fy, y1 = Math.Min(y0 + 1, Height - 1);
+                double wy = fy - y0;
+                for (int x = 0; x < newWidth; x++)
+                {
+                    double fx = Math.Clamp((x + 0.5) * sx - 0.5, 0, Width - 1);
+                    int x0 = (int)fx, x1 = Math.Min(x0 + 1, Width - 1);
+                    double wx = fx - x0;
+
+                    double r = 0, g = 0, b = 0, a = 0;
+                    void Add(int px, int py, double w)
+                    {
+                        int i = (py * Width + px) * 4;
+                        double al = Pixels[i + 3] * w;
+                        r += Pixels[i] * al; g += Pixels[i + 1] * al; b += Pixels[i + 2] * al; a += al;
+                    }
+                    Add(x0, y0, (1 - wx) * (1 - wy));
+                    Add(x1, y0, wx * (1 - wy));
+                    Add(x0, y1, (1 - wx) * wy);
+                    Add(x1, y1, wx * wy);
+
+                    int o = (y * newWidth + x) * 4;
+                    if (a > 0)
+                    {
+                        dst.Pixels[o] = (byte)Math.Clamp(Math.Round(r / a), 0, 255);
+                        dst.Pixels[o + 1] = (byte)Math.Clamp(Math.Round(g / a), 0, 255);
+                        dst.Pixels[o + 2] = (byte)Math.Clamp(Math.Round(b / a), 0, 255);
+                        dst.Pixels[o + 3] = (byte)Math.Clamp(Math.Round(a), 0, 255);
+                    }
+                }
+            }
+            return dst;
         }
 
         public byte AlphaAt(int x, int y) => Pixels[(y * Width + x) * 4 + 3];
