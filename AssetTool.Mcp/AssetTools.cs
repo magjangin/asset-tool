@@ -253,7 +253,8 @@ public static class BundleTools
     [Description("One-shot pipeline for Unity bundles: extract Texture2D + TextAsset (.atlas/.skel) and Sprites, then split every " +
                  "Spine atlas into per-part PNGs. layout='by_bundle' (default) writes one folder per bundle: " +
                  "<workDir>/<bundle>/파츠 (<atlas name>/<region>.png), /스프라이트 (loose sprites: long notes, hit points, backgrounds, skins...) " +
-                 "and /원본 (.atlas, .skel, page PNGs). layout='classic' extracts the whole input into <workDir>/extracted and splits into <workDir>/parts.")]
+                 "and /원본 (mirrors 파츠: one folder per atlas holding its .atlas, page PNGs and the .skel files that use it; " +
+                 "스켈_짝맞춤.csv lists how skeletons were matched). layout='classic' extracts the whole input into <workDir>/extracted and splits into <workDir>/parts.")]
     public static async Task<object> ExtractAndSplit(
         [Description("A bundle file, or a folder containing bundles.")] string inputPath,
         [Description("Working folder; per-bundle folders (or 'extracted' and 'parts' for layout='classic') are created inside it.")] string workDir,
@@ -324,6 +325,14 @@ public static class BundleTools
                 split = await AssetTools.SplitAtlasFolder(rawDir, partsDir, naming, flattenFolders: true,
                                                           copyUnusedPngs: false, cancellationToken: cancellationToken);
 
+            // Mirror the split output: one raw folder per atlas folder, skeletons placed inside.
+            RawOrganizeResult? organized = null;
+            if (split is not null && Directory.Exists(partsDir))
+            {
+                organized = RawOrganizer.Organize(rawDir, partsDir);
+                RawOrganizer.WritePlacementCsv(Path.Combine(bundleDir, RawOrganizer.PlacementCsvName), organized.Skeletons);
+            }
+
             int sprites = 0;
             if (includeSprites)
             {
@@ -342,6 +351,9 @@ public static class BundleTools
                 parts = Prop<int>(split, "parts"),
                 sprites,
                 rawFiles = Directory.EnumerateFiles(rawDir, "*", SearchOption.AllDirectories).Count(),
+                rawFolders = organized?.Folders ?? 0,
+                looseRawFiles = organized?.LooseFiles ?? 0,
+                skeletonsWithoutAtlas = organized?.Skeletons.Count(k => k.Folder.Length == 0) ?? 0,
                 warnings = Prop<int>(split, "warnings"),
                 failures = Prop<int>(split, "failures"),
                 splitLog = Prop<string>(split, "logPath")
