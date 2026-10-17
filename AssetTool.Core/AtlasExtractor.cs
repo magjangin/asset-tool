@@ -60,7 +60,7 @@ namespace asset_tool
                     valid.Add(region);
             }
 
-            var resolver = options.RemoveOverlapLeaks ? new AtlasOverlapResolver(page, valid) : null;
+            var resolver = options.RemoveOverlapLeaks ? new AtlasOverlapResolver(page, valid, resized ? AtlasOverlapResolver.ResampledSolidAlpha : (byte)32) : null;
             var result = new PageExtraction { PageHasOverlaps = resolver?.HasOverlaps ?? false, PageWasResized = resized };
             result.SkippedRegions.AddRange(skipped);
 
