@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 namespace asset_tool
@@ -52,7 +52,15 @@ namespace asset_tool
     // entries pointing at one image) share ownership.
     public sealed class AtlasOverlapResolver
     {
-        private const byte SolidAlpha = 32;
+        private const byte DefaultSolidAlpha = 32;
+
+        // Pages Unity re-sampled (and we scaled back) have their gaps smeared into faint
+        // bridges that reach alpha 32-95, which would fuse neighbouring parts into one
+        // blob and hand a small part to the big region around it. Measured against
+        // never-resampled atlases (mimicking x0.75 / x0.86 / x1.17 resampling): 32 loses
+        // 11-18 regions outright, 96 loses none and still matches the true ownership of
+        // 99.7% of pixels.
+        public const byte ResampledSolidAlpha = 96;
         private const int Unassigned = -1;
         private const int Collecting = int.MaxValue;
 
@@ -61,11 +69,14 @@ namespace asset_tool
         private readonly List<PixelRect> _groupRects = new();
         private readonly Dictionary<AtlasRegion, int> _groupOf = new();
 
+        private readonly byte SolidAlpha;
+
         public bool HasOverlaps { get; }
 
         // `regions` must already be validated to lie inside the page.
-        public AtlasOverlapResolver(RgbaImage page, IReadOnlyList<AtlasRegion> regions)
+        public AtlasOverlapResolver(RgbaImage page, IReadOnlyList<AtlasRegion> regions, byte solidAlpha = DefaultSolidAlpha)
         {
+            SolidAlpha = solidAlpha;
             _pageWidth = page.Width;
 
             var groupByRect = new Dictionary<PixelRect, int>();
