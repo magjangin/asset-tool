@@ -15,6 +15,13 @@ namespace asset_tool
         // Standalone sprites no atlas refers to (e.g. Muse Dash's 0102_* long
         // note textures) are copied as-is so the output is a complete set.
         public bool CopyUnusedPngs { get; init; } = true;
+
+        // Drop the atlas's source folder from the output path: parts go to
+        //   <output>\<atlas name>\<region>.png
+        // (what Spine's image-folder import expects, e.g. a "TextAsset" style tree)
+        // instead of <output>\<atlas folder>\<atlas name>\<region>.png. Two atlases
+        // with the same name get a _2, _3 ... suffix so they never overwrite each other.
+        public bool FlattenFolders { get; init; }
     }
 
     // Done/Total drive the progress bar; LogLine (if any) is appended to the log.
@@ -40,6 +47,7 @@ namespace asset_tool
     public static class BatchProcessor
     {
         public const string LogFileName = "_split_log.txt";
+        public const string UnusedPngFolder = "_unused_pngs";
 
         public static BatchSummary Run(string inputRoot, string outputRoot, BatchOptions options,
                                        IProgress<BatchProgress>? progress, CancellationToken ct)
@@ -79,6 +87,7 @@ namespace asset_tool
             var pngsByName = pngs.GroupBy(f => Path.GetFileName(f), StringComparer.OrdinalIgnoreCase)
                                  .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
             var usedPngs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var usedFlatNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             total = atlases.Count + (options.CopyUnusedPngs ? 1 : 0);
             Log($"입력: {inputRoot}");
@@ -92,7 +101,7 @@ namespace asset_tool
                 var relAtlas = Path.GetRelativePath(inputRoot, atlasPath);
                 try
                 {
-                    ProcessAtlas(atlasPath, relAtlas, inputRoot, outputRoot, options, pngsByName, usedPngs, summary, Log, ct);
+                    ProcessAtlas(atlasPath, relAtlas, inputRoot, outputRoot, options, pngsByName, usedPngs, usedFlatNames, summary, Log, ct);
                 }
                 catch (OperationCanceledException)
                 {
@@ -121,7 +130,8 @@ namespace asset_tool
                     var rel = Path.GetRelativePath(inputRoot, png);
                     try
                     {
-                        var dest = Path.Combine(outputRoot, rel);
+                        // Flattened output has no per-folder structure, so keep stray PNGs apart.
+                        var dest = Path.Combine(outputRoot, options.FlattenFolders ? Path.Combine(UnusedPngFolder, rel) : rel);
                         Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
                         File.Copy(png, dest, overwrite: true);
                         summary.CopiedPngs++;
@@ -150,8 +160,8 @@ namespace asset_tool
 
         private static void ProcessAtlas(string atlasPath, string relAtlas, string inputRoot, string outputRoot,
                                          BatchOptions options, IReadOnlyDictionary<string, List<string>> pngsByName,
-                                         HashSet<string> usedPngs, BatchSummary summary, Action<string> log,
-                                         CancellationToken ct)
+                                         HashSet<string> usedPngs, HashSet<string> usedFlatNames, BatchSummary summary,
+                                         Action<string> log, CancellationToken ct)
         {
             var pages = AtlasParser.Parse(atlasPath);
             if (pages.Count == 0)
@@ -162,54 +172,102 @@ namespace asset_tool
             }
 
             var relDir = Path.GetDirectoryName(relAtlas) ?? "";
-            var outDir = Path.Combine(outputRoot, relDir, AtlasStem(atlasPath));
-            var namer = new ExportNamer(options.Naming); // one namespace per atlas folder
             var notes = new List<string>();
-            int atlasParts = 0, atlasCleaned = 0;
-
+            string outDir;
+            if (options.FlattenFolders)
+            {
+                var stem = AtlasStem(atlasPath);
+                var flatName = stem;
+                for (int n = 2; !usedFlatNames.Add(flatName); n++)
+                    flatName = $"{stem}_{n}";
+                if (flatName != stem)
+                {
+                    summary.Warnings++;
+                    notes.Add($"같은 이름의 아틀라스가 있어 폴더 이름을 {flatName}(으)로 저장");
+                }
+                outDir = Path.Combine(outputRoot, flatName);
+            }
+            else
+            {
+                outDir = Path.Combine(outputRoot, relDir, AtlasStem(atlasPath));
+            }
+            // Per page, every picture the atlas might mean (usually exactly one).
+            var candidates = new List<List<string>?>();
             foreach (var page in pages)
             {
-                ct.ThrowIfCancellationRequested();
-
-                var pngPath = PagePngLocator.Find(atlasPath, page.ImageFile, pngsByName);
-                if (pngPath is null)
+                var found = PagePngLocator.Find(atlasPath, page.ImageFile, pngsByName);
+                if (found is null)
                 {
                     summary.Warnings++;
                     notes.Add($"페이지 PNG를 찾지 못함: {page.ImageFile}");
+                    candidates.Add(null);
                     continue;
                 }
-                usedPngs.Add(pngPath);
+                var variants = PagePngLocator.FindVariants(found);
+                foreach (var v in variants) usedPngs.Add(v);
+                candidates.Add(variants);
+            }
 
-                var image = RgbaImage.Load(pngPath);
-                if (page.Width > 0 && page.Height > 0 && (page.Width != image.Width || page.Height != image.Height))
-                {
-                    summary.Warnings++;
-                    notes.Add($"{page.ImageFile} 크기가 아틀라스({page.Width}x{page.Height})와 PNG({image.Width}x{image.Height})에서 다름 → 아틀라스 크기로 보정해 처리 (화질이 약간 떨어질 수 있음)");
-                }
+            // Several different pictures under one name: output every one of them,
+            // in a stable order. The first keeps the plain folder, the rest get _v2, _v3.
+            int variantCount = Math.Max(1, candidates.Max(c => c?.Count ?? 0));
+            if (variantCount > 1)
+            {
+                summary.Warnings++;
+                notes.Add($"같은 이름의 서로 다른 텍스처가 {variantCount}장 있어 모두 저장 (폴더 {Path.GetFileName(outDir)}, " +
+                          $"{string.Join(", ", Enumerable.Range(2, variantCount - 1).Select(n => $"{Path.GetFileName(outDir)}_v{n}"))}). " +
+                          "어느 쪽이 원래 짝인지 파일만으로는 알 수 없습니다");
+            }
 
-                var extraction = AtlasExtractor.ExtractPage(image, page, options.Extract);
-                foreach (var part in extraction.Parts)
-                {
-                    var rel = namer.Next(part.Region.ExportName, $"part_{atlasParts + 1:D2}");
-                    var outPath = Path.Combine(outDir, rel + ".png");
-                    Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
-                    File.WriteAllBytes(outPath, part.Image.EncodePng());
-                    atlasParts++;
-                    if (part.OverlapPixelsRemoved > 0) atlasCleaned++;
-                }
+            int atlasParts = 0, atlasCleaned = 0;
+            for (int variant = 0; variant < variantCount; variant++)
+            {
+                var variantDir = variant == 0 ? outDir : $"{outDir}_v{variant + 1}";
+                if (variant > 0 && options.FlattenFolders)
+                    usedFlatNames.Add(Path.GetFileName(variantDir));
+                var namer = new ExportNamer(options.Naming); // one namespace per output folder
+                int variantParts = 0;
 
-                if (extraction.KeptUncleanedRegions.Count > 0)
+                for (int pageIndex = 0; pageIndex < pages.Count; pageIndex++)
                 {
-                    summary.Warnings++;
-                    notes.Add($"겹침 정리 시 통째로 사라질 리전은 정리 없이 그대로 사용: {string.Join(", ", extraction.KeptUncleanedRegions)}");
-                }
+                    ct.ThrowIfCancellationRequested();
+                    var page = pages[pageIndex];
+                    var pageCandidates = candidates[pageIndex];
+                    if (pageCandidates is null) continue;
+                    var pngPath = pageCandidates[Math.Min(variant, pageCandidates.Count - 1)];
 
-                if (extraction.SkippedRegions.Count > 0)
-                {
-                    summary.Warnings++;
-                    notes.Add($"범위를 벗어나 제외: {string.Join(", ", extraction.SkippedRegions)}");
+                    var image = RgbaImage.Load(pngPath);
+                    if (variant == 0 && page.Width > 0 && page.Height > 0 && (page.Width != image.Width || page.Height != image.Height))
+                    {
+                        summary.Warnings++;
+                        notes.Add($"{page.ImageFile} 크기가 아틀라스({page.Width}x{page.Height})와 PNG({image.Width}x{image.Height})에서 다름 → 아틀라스 크기로 보정해 처리 (화질이 약간 떨어질 수 있음)");
+                    }
+
+                    var extraction = AtlasExtractor.ExtractPage(image, page, options.Extract);
+                    foreach (var part in extraction.Parts)
+                    {
+                        var rel = namer.Next(part.Region.ExportName, $"part_{variantParts + 1:D2}");
+                        var outPath = Path.Combine(variantDir, rel + ".png");
+                        Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+                        File.WriteAllBytes(outPath, part.Image.EncodePng());
+                        atlasParts++;
+                        variantParts++;
+                        if (part.OverlapPixelsRemoved > 0) atlasCleaned++;
+                    }
+
+                    if (variant == 0 && extraction.KeptUncleanedRegions.Count > 0)
+                    {
+                        summary.Warnings++;
+                        notes.Add($"겹침 정리 시 통째로 사라질 리전은 정리 없이 그대로 사용: {string.Join(", ", extraction.KeptUncleanedRegions)}");
+                    }
+
+                    if (variant == 0 && extraction.SkippedRegions.Count > 0)
+                    {
+                        summary.Warnings++;
+                        notes.Add($"범위를 벗어나 제외: {string.Join(", ", extraction.SkippedRegions)}");
+                    }
+                    summary.Pages++;
                 }
-                summary.Pages++;
             }
 
             summary.Atlases++;
