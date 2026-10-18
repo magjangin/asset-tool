@@ -20,6 +20,8 @@ namespace asset_tool
         // Skeleton scale applied when importing (-s). Muse Dash part PNGs are half the size
         // the skeleton data was authored for, so 0.5 makes the parts line up again.
         public double ImportScale { get; init; } = 0.5;
+        // Java heap for the editor (-Xmx); the launcher's default of 4096 overflows with many skeletons in one project.
+        public int MaxMemoryMb { get; init; } = 8192;
     }
 
     public sealed class SpineProject
@@ -31,6 +33,8 @@ namespace asset_tool
         public SpineSettings Settings = new();
         public string CliPath = "";
         public List<string> Warnings = new();
+        // Skeleton names inside the project (PrepareMany); skin variants are "<name>__<skin>".
+        public List<string> Skeletons = new();
     }
 
     public sealed class SpineFrame
@@ -156,8 +160,13 @@ namespace asset_tool
         // Several skeletons that share one parts folder go into a single project, so a whole
         // scene costs a handful of editor starts instead of four per skeleton.
         // Skeletons keep their file names; the project is <workDir>\scene.spine.
+        // With skinVariants, a skeleton that has skins besides "default" is split up: one copy per skin named
+        // "<name>__<skin>", whose default skin is the original default plus that skin, with every other skin removed.
+        // Muse Dash keeps some body parts only in such a skin ("origin", "xiemei", "Miku"...). Removing the other skins
+        // matters: while they exist, the editor's PNG export draws with one of them selected and skips the rest.
+        // The plain "<name>" is kept only if the default skin already holds every slot some skin fills.
         public static SpineProject PrepareMany(IReadOnlyList<string> skelPaths, string partsDir, string workDir,
-                                               SpineSettings settings, CancellationToken ct)
+                                               SpineSettings settings, bool skinVariants, CancellationToken ct)
         {
             var cli = FindCli(settings.CliPath)
                 ?? throw new FileNotFoundException($"Spine.com을 찾을 수 없습니다. spineCliPath를 주거나 환경변수 {CliEnvVar}를 설정하세요.");
@@ -174,11 +183,16 @@ namespace asset_tool
             var key = string.Join("|", skels.Select(p => { var f = new FileInfo(p); return $"{f.Name}:{f.Length}:{f.LastWriteTimeUtc.Ticks}"; })
                                        .Append(partsDir)
                                        .Append(settings.ImportScale.ToString(CultureInfo.InvariantCulture))
-                                       .Append(settings.Version));
+                                       .Append(settings.Version)
+                                       .Append(skinVariants ? "skins3" : "noskins"));
             var metaPath = Path.Combine(workDir, "prepared.json");
             if (File.Exists(project.ProjectPath) && File.Exists(metaPath) &&
-                JsonNode.Parse(File.ReadAllText(metaPath))?["key"]?.GetValue<string>() == key)
+                JsonNode.Parse(File.ReadAllText(metaPath)) is { } meta && meta["key"]?.GetValue<string>() == key &&
+                meta["skeletons"] is JsonArray cached)
+            {
+                project.Skeletons = cached.Select(n => n!.GetValue<string>()).ToList();
                 return project;
+            }
 
             var skelDir = Path.Combine(workDir, "skel");
             var rawDir = Path.Combine(workDir, "raw");
@@ -208,15 +222,156 @@ namespace asset_tool
                 if (!File.Exists(json)) throw new InvalidOperationException($"JSON 내보내기에서 빠진 스켈레톤: {Path.GetFileName(s)}");
                 var root = JsonNode.Parse(File.ReadAllText(json, Encoding.UTF8)) ?? throw new InvalidDataException("스켈레톤 JSON을 읽을 수 없습니다.");
                 (root["skeleton"] ??= new JsonObject())["images"] = partsDir;
-                File.WriteAllText(Path.Combine(patchedDir, Path.GetFileName(json)), root.ToJsonString(), new UTF8Encoding(false));
+                var baseName = Path.GetFileNameWithoutExtension(s);
+
+                void Add(string name, JsonNode node)
+                {
+                    File.WriteAllText(Path.Combine(patchedDir, name + ".json"), node.ToJsonString(), new UTF8Encoding(false));
+                    project.Skeletons.Add(name);
+                }
+
+                var extraSkins = skinVariants ? SkinNames(root) : new List<string>();
+                if (extraSkins.Count == 0) { Add(baseName, root); continue; }
+
+                foreach (var skin in extraSkins)
+                    Add(baseName + "__" + Regex.Replace(skin, @"[^A-Za-z0-9_]", "_"), MergeSkin(root, skin));
+                if (DefaultHasEverySkinSlot(root, extraSkins))
+                    Add(baseName, DefaultSkinOnly(root));
             }
 
             var warnings = new List<string>();
             RunChecked(cli, settings, workDir, new[] { "-i", patchedDir, "-s", settings.ImportScale.ToString(CultureInfo.InvariantCulture),
                                                        "-o", project.ProjectPath, "-r" }, project.ProjectPath, "프로젝트 만들기", warnings, ct);
             project.Warnings = warnings.Distinct().ToList();
-            File.WriteAllText(metaPath, new JsonObject { ["key"] = key }.ToJsonString());
+            File.WriteAllText(metaPath, new JsonObject
+            {
+                ["key"] = key,
+                ["skeletons"] = new JsonArray(project.Skeletons.Select(n => (JsonNode?)JsonValue.Create(n)).ToArray())
+            }.ToJsonString());
             return project;
+        }
+
+        // Names of the skins besides "default" that carry attachments.
+        private static List<string> SkinNames(JsonNode skeletonJson) =>
+            (skeletonJson["skins"] as JsonArray)?
+                .Select(s => s?["name"]?.GetValue<string>())
+                .Where(n => n is not null && n != "default" && SkinAttachments(skeletonJson, n) is { Count: > 0 })
+                .Select(n => n!).ToList() ?? new List<string>();
+
+        private static JsonObject? SkinAttachments(JsonNode skeletonJson, string skin) =>
+            (skeletonJson["skins"] as JsonArray)?.FirstOrDefault(s => s?["name"]?.GetValue<string>() == skin)?["attachments"] as JsonObject;
+
+        private static bool DefaultHasEverySkinSlot(JsonNode skeletonJson, List<string> skins)
+        {
+            var have = SkinAttachments(skeletonJson, "default")?.Select(kv => kv.Key).ToHashSet() ?? new HashSet<string>();
+            return skins.All(skin => SkinAttachments(skeletonJson, skin)!.All(kv => have.Contains(kv.Key)));
+        }
+
+        private static JsonObject CloneDefaultSkin(JsonNode copy)
+        {
+            var def = (copy["skins"] as JsonArray)?.FirstOrDefault(s => s?["name"]?.GetValue<string>() == "default")?.DeepClone() as JsonObject
+                      ?? new JsonObject { ["name"] = "default" };
+            if (def["attachments"] is not JsonObject) def["attachments"] = new JsonObject();
+            return def;
+        }
+
+        // The skeleton with its default skin only.
+        private static JsonNode DefaultSkinOnly(JsonNode skeletonJson)
+        {
+            var copy = skeletonJson.DeepClone();
+            copy["skins"] = new JsonArray(CloneDefaultSkin(copy));
+            RekeyDeform(copy, null);
+            return copy;
+        }
+
+        // Copy of the skeleton whose only skin is the default skin plus the given skin's attachments (the skin wins on
+        // a clash). Bones and constraints that exist only for a skin are switched on, since no skin is selected any more.
+        private static JsonNode MergeSkin(JsonNode skeletonJson, string skin)
+        {
+            var copy = skeletonJson.DeepClone();
+            var def = CloneDefaultSkin(copy);
+            var defAttachments = (JsonObject)def["attachments"]!;
+            if (SkinAttachments(copy, skin) is { } fromSkin)
+            {
+                foreach (var (slot, attachments) in fromSkin.ToList())
+                {
+                    var target = defAttachments[slot] as JsonObject ?? (JsonObject)(defAttachments[slot] = new JsonObject())!;
+                    if (attachments is not JsonObject items) continue;
+                    foreach (var (attName, att) in items.ToList())
+                    {
+                        var clone = att?.DeepClone();
+                        // Spine re-keys a default-skin attachment by its "name" on import, which would no longer match
+                        // the slot's setup attachment (the key). Keep key and name equal; the image lookup moves to "path".
+                        if (clone is JsonObject o && o["name"]?.GetValue<string>() is { } realName && realName != attName)
+                        {
+                            o["path"] ??= realName;
+                            o["name"] = attName;
+                        }
+                        target[attName] = clone;
+                    }
+                }
+            }
+            ResolveLinkedMeshes(skeletonJson, defAttachments);
+            copy["skins"] = new JsonArray(def);
+            RekeyDeform(copy, skin);
+            foreach (var listName in new[] { "bones", "ik", "transform", "path" })
+                if (copy[listName] is JsonArray list)
+                    foreach (var item in list)
+                        (item as JsonObject)?.Remove("skin");
+            return copy;
+        }
+
+        // A linked mesh borrows the geometry of a parent mesh, possibly from another skin that no longer exists
+        // in the variant (RinLen's body points at Miku's body). Turn it into a plain mesh carrying that geometry.
+        private static void ResolveLinkedMeshes(JsonNode originalSkeleton, JsonObject defaultAttachments)
+        {
+            foreach (var (slot, atts) in defaultAttachments.ToList())
+            {
+                if (atts is not JsonObject items) continue;
+                foreach (var (key, att) in items.ToList())
+                {
+                    if (att is not JsonObject linked || linked["type"]?.GetValue<string>() != "linkedmesh") continue;
+                    var parentName = linked["parent"]?.GetValue<string>();
+                    var parentSkin = linked["skin"]?.GetValue<string>() ?? "default";
+                    if (parentName is null) continue;
+                    if (SkinAttachments(originalSkeleton, parentSkin)?[slot]?[parentName] is not JsonObject parent) continue;
+                    if (parent["type"]?.GetValue<string>() is not ("mesh" or null)) continue;
+
+                    var mesh = (JsonObject)parent.DeepClone();
+                    mesh["name"] = key;
+                    mesh["path"] = linked["path"]?.DeepClone() ?? linked["name"]?.DeepClone() ?? JsonValue.Create(key);
+                    mesh["type"] = "mesh";
+                    foreach (var field in new[] { "color", "width", "height" })
+                        if (linked[field] is { } v) mesh[field] = v.DeepClone();
+                    items[key] = mesh;
+                }
+            }
+        }
+
+        // Deform timelines are keyed by skin name. Keep the default skin's and fold the chosen skin's into it;
+        // timelines for skins that were removed make the file unreadable.
+        private static void RekeyDeform(JsonNode skeleton, string? mergedSkin)
+        {
+            if (skeleton["animations"] is not JsonObject animations) return;
+            foreach (var (_, animation) in animations.ToList())
+            {
+                if (animation?["deform"] is not JsonObject deform) continue;
+                var merged = deform["default"] as JsonObject ?? new JsonObject();
+                if (mergedSkin is not null && deform[mergedSkin] is JsonObject fromSkin)
+                {
+                    foreach (var (slot, byAttachment) in fromSkin.ToList())
+                    {
+                        var target = merged[slot] as JsonObject ?? (JsonObject)(merged[slot] = new JsonObject())!;
+                        if (byAttachment is JsonObject atts)
+                            foreach (var (attName, timeline) in atts.ToList())
+                                target[attName] = timeline?.DeepClone();
+                    }
+                }
+                foreach (var key in deform.Select(kv => kv.Key).ToList())
+                    deform.Remove(key);
+                if (merged.Count > 0) deform["default"] = merged;
+                if (deform.Count == 0) ((JsonObject)animation).Remove("deform");
+            }
         }
 
         // Every animation of every skeleton in one run: <framesDir>\<skeleton>-<animation>_NN.png
@@ -321,7 +476,7 @@ namespace asset_tool
         private static void RunChecked(string cli, SpineSettings settings, string workDir, IEnumerable<string> args, string? expectedFile,
                                        string what, List<string> warnings, CancellationToken ct)
         {
-            var all = new List<string> { "-u", settings.Version };
+            var all = new List<string> { $"-Xmx{settings.MaxMemoryMb}m", "-u", settings.Version };
             all.AddRange(args);
             var (exit, lines) = Run(cli, all, workDir, ct);
 
