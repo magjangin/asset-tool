@@ -387,16 +387,67 @@ public static class SpineTools
         }
     }
 
-    // Writes the frame as a PNG, cropped to alpha > 4 plus padding. False if nothing is painted.
+    // Writes the frame as a PNG, cropped to the painted area plus padding. False if nothing is painted.
     private static bool SaveFrame(string source, string dest, bool crop, int padding)
     {
         if (!crop) { File.Copy(source, dest, overwrite: true); return true; }
-        if (ContactSheet.OpaqueBounds(source, 4) is not { } b) return false;
         var image = RgbaImage.Load(source);
+        if (ContentBounds(image) is not { } b) return false;
         int x = Math.Max(0, b.Left - padding), y = Math.Max(0, b.Top - padding);
         int right = Math.Min(image.Width, b.Right + padding), bottom = Math.Min(image.Height, b.Bottom + padding);
         File.WriteAllBytes(dest, image.Crop(x, y, right - x, bottom - y).EncodePng());
         return true;
+    }
+
+    // Bounding box of what is painted (alpha > 4), except a flat blob far below or above the rest: a hovering
+    // monster's ground shadow sits hundreds of pixels away and would shrink the monster to a speck in the file.
+    // A shadow right under the monster stays.
+    private static (int Left, int Top, int Right, int Bottom)? ContentBounds(RgbaImage image)
+    {
+        const int threshold = 4;
+        int w = image.Width, h = image.Height;
+        var px = image.Pixels;
+        var rowCount = new int[h];
+        for (int y = 0; y < h; y++)
+        {
+            int n = 0;
+            for (int x = 0; x < w; x++)
+                if (px[(y * w + x) * 4 + 3] > threshold) n++;
+            rowCount[y] = n;
+        }
+
+        // Runs of consecutive painted rows.
+        var runs = new List<(int Start, int End, long Mass)>();
+        int start = -1;
+        long mass = 0;
+        for (int y = 0; y <= h; y++)
+        {
+            bool painted = y < h && rowCount[y] > 0;
+            if (painted) { if (start < 0) start = y; mass += rowCount[y]; }
+            else if (start >= 0) { runs.Add((start, y - 1, mass)); start = -1; mass = 0; }
+        }
+        if (runs.Count == 0) return null;
+
+        var main = runs.MaxBy(r => r.Mass);
+        int mainHeight = main.End - main.Start + 1;
+        int minGap = Math.Max(12, mainHeight * 15 / 100);
+        var kept = runs.Where(r =>
+        {
+            if (r == main) return true;
+            int gap = r.End < main.Start ? main.Start - r.End - 1 : r.Start - main.End - 1;
+            int height = r.End - r.Start + 1;
+            int width = 0;
+            for (int y = r.Start; y <= r.End; y++) width = Math.Max(width, rowCount[y]);
+            bool flat = height * 5 <= width * 2; // wider than 2.5 x its height: an ellipse, not a limb
+            return !(flat && gap > minGap);
+        }).ToList();
+
+        int top = kept.Min(r => r.Start), bottom = kept.Max(r => r.End);
+        int left = w, rightEdge = -1;
+        for (int y = top; y <= bottom; y++)
+            for (int x = 0; x < w; x++)
+                if (px[(y * w + x) * 4 + 3] > threshold) { if (x < left) left = x; if (x > rightEdge) rightEdge = x; }
+        return (left, top, rightEdge + 1, bottom + 1);
     }
 
     private static int? TrailingNumber(string name)
