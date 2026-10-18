@@ -619,12 +619,21 @@ public static class SpineTools
         [Description("Output size in percent of the imported skeleton. Default 100.")] int scalePercent = 100,
         [Description("Transparent pixels kept around each animation's rectangle. Default 4.")] int padding = 4,
         [Description("Also write the single frames as PNG files (not only the sheets). Default true.")] bool writeFrames = true,
+        [Description("'all' (default): a skeleton with skins besides 'default' is exported once per skin into <outputDir>\\<skin>\\ (a boss such as 0301 keeps its body only in the " +
+                     "skins hexie (censored) and origin, so without this the body is missing). 'default': the skeleton as it is.")] string skins = "all",
         [Description("Path to Spine.com. Defaults to the SPINE_CLI environment variable, then C:\\Program Files\\Spine\\Spine.com.")] string? spineCliPath = null,
         [Description("Spine editor version to run (-u). Default 3.8.99.")] string spineVersion = "3.8.99",
         CancellationToken cancellationToken = default)
     {
         try
         {
+            bool includeSkins;
+            switch (skins.Trim().ToLowerInvariant())
+            {
+                case "all": includeSkins = true; break;
+                case "default": includeSkins = false; break;
+                default: return new { ok = false, error = "skins는 all 또는 default여야 합니다." };
+            }
             if (!File.Exists(skelPath))
                 return new { ok = false, error = $"파일이 없습니다: {skelPath}" };
             if (fps <= 0 || importScale <= 0 || scalePercent <= 0 || padding < 0)
@@ -638,58 +647,32 @@ public static class SpineTools
 
             return await Task.Run<object>(() =>
             {
-                var project = SpineRenderer.Prepare(skelPath, parts, work, settings, cancellationToken);
+                // Skins go through the multi-skeleton project; without extra skins the list holds just the skeleton itself.
+                var project = SpineRenderer.PrepareMany(new[] { skelPath }, parts, work, settings, includeSkins, cancellationToken);
                 // One canvas for the whole export keeps every frame aligned; each animation is then cropped to its own rectangle.
                 var framesDir = Path.Combine(work, FramesFolder);
-                var frames = SpineRenderer.ExportAll(project, framesDir, fps, maxBounds: true, scalePercent, cancellationToken);
+                var frames = SpineRenderer.ExportAllSkeletons(project, project.Skeletons, framesDir, fps, maxBounds: true, scalePercent, cancellationToken);
 
                 Directory.CreateDirectory(outputDir);
-                var summary = new List<object>();
-                foreach (var group in frames.GroupBy(f => f.Animation).OrderBy(g => g.Key, StringComparer.Ordinal))
+                var variants = new List<object>();
+                foreach (var skeleton in project.Skeletons)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (wanted.Count > 0 && !wanted.Contains(group.Key)) continue;
-                    var list = group.OrderBy(f => f.Index).ToList();
+                    // <outputDir>\<skin>\ when the skeleton was split by skin, else <outputDir> itself.
+                    var skin = skeleton.Contains("__") ? skeleton[(skeleton.IndexOf("__", StringComparison.Ordinal) + 2)..] : null;
+                    var root = project.Skeletons.Count == 1 && skin is null ? outputDir : Path.Combine(outputDir, skin ?? "default");
+                    var summary = WriteAnimationSheets(frames.Where(f => f.Skeleton == skeleton).ToList(), root, fps, padding, writeFrames, wanted, cancellationToken);
 
-                    SkiaSharp.SKRectI? union = null;
-                    foreach (var f in list)
-                        if (ContactSheet.OpaqueBounds(f.Path, 4) is { } b)
-                            union = union is { } u ? SkiaSharp.SKRectI.Union(u, b) : b;
-                    if (union is null) { summary.Add(new { animation = group.Key, frames = list.Count, empty = true }); continue; }
-
-                    var first = RgbaImage.Load(list[0].Path);
-                    int x = Math.Max(0, union.Value.Left - padding), y = Math.Max(0, union.Value.Top - padding);
-                    int w = Math.Min(first.Width, union.Value.Right + padding) - x, h = Math.Min(first.Height, union.Value.Bottom + padding) - y;
-
-                    // A grid no wider than MaxSheetWidth, frames left to right then top to bottom.
-                    int columns = Math.Clamp(MaxSheetWidth / w, 1, list.Count);
-                    int rowsNeeded = (list.Count + columns - 1) / columns;
-                    var sheet = new RgbaImage(w * columns, h * rowsNeeded);
-                    var animDir = Path.Combine(outputDir, SafeName(group.Key));
-                    if (writeFrames) Directory.CreateDirectory(animDir);
-                    for (int i = 0; i < list.Count; i++)
-                    {
-                        var cropped = RgbaImage.Load(list[i].Path).Crop(x, y, w, h);
-                        int cellX = i % columns * w, cellY = i / columns * h;
-                        for (int row = 0; row < h; row++)
-                            Buffer.BlockCopy(cropped.Pixels, row * w * 4, sheet.Pixels, ((cellY + row) * sheet.Width + cellX) * 4, w * 4);
-                        if (writeFrames)
-                            File.WriteAllBytes(Path.Combine(animDir, $"{SafeName(group.Key)}_{i:D2}.png"), cropped.EncodePng());
-                    }
-                    File.WriteAllBytes(Path.Combine(outputDir, $"{SafeName(group.Key)}_sheet.png"), sheet.EncodePng());
-                    summary.Add(new { animation = group.Key, frames = list.Count, seconds = Math.Round(list.Count / fps, 2),
-                                      frameWidth = w, frameHeight = h, sheetColumns = columns, sheetRows = rowsNeeded });
+                    var meta = new { skeleton = skeleton, skin = skin ?? "default", fps, importScale, scalePercent, partsDir = project.PartsDir, animations = summary };
+                    File.WriteAllText(Path.Combine(root, "animations.json"),
+                                      System.Text.Json.JsonSerializer.Serialize(meta, new System.Text.Json.JsonSerializerOptions
+                                      {
+                                          WriteIndented = true,
+                                          Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                                      }), new System.Text.UTF8Encoding(false));
+                    variants.Add(new { skeleton, skin = skin ?? "default", folder = Path.GetFullPath(root), animationCount = summary.Count, animations = summary });
                 }
-
-                var meta = new { skeleton = project.Name, fps, importScale, scalePercent, partsDir = project.PartsDir, animations = summary };
-                File.WriteAllText(Path.Combine(outputDir, "animations.json"),
-                                  System.Text.Json.JsonSerializer.Serialize(meta, new System.Text.Json.JsonSerializerOptions
-                                  {
-                                      WriteIndented = true,
-                                      Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-                                  }), new System.Text.UTF8Encoding(false));
                 Directory.Delete(framesDir, recursive: true); // full-canvas frames are large and not needed any more
-                return new { ok = true, skeleton = project.Name, fps, animationCount = summary.Count, animations = summary,
+                return new { ok = true, skeleton = Path.GetFileNameWithoutExtension(skelPath), fps, variants,
                              outputDir = Path.GetFullPath(outputDir), warnings = project.Warnings.Where(w => !w.Contains("dimensions changed", StringComparison.OrdinalIgnoreCase)).Take(10) };
             }, cancellationToken);
         }
@@ -701,6 +684,75 @@ public static class SpineTools
         {
             return new { ok = false, error = ex.Message };
         }
+    }
+
+    // Frames of one skeleton: per animation a folder of transparent frames, a sprite sheet grid, and preview pictures.
+    private static List<object> WriteAnimationSheets(List<SpineFrame> frames, string root, double fps, int padding, bool writeFrames,
+                                                     HashSet<string> wanted, CancellationToken ct)
+    {
+        Directory.CreateDirectory(root);
+        var summary = new List<object>();
+        var previewRows = new List<(string Title, string Subtitle, List<SheetCell> Cells)>();
+        foreach (var group in frames.GroupBy(f => f.Animation).OrderBy(g => g.Key, StringComparer.Ordinal))
+        {
+            ct.ThrowIfCancellationRequested();
+            if (wanted.Count > 0 && !wanted.Contains(group.Key)) continue;
+            var list = group.OrderBy(f => f.Index).ToList();
+
+            SkiaSharp.SKRectI? union = null;
+            foreach (var f in list)
+                if (ContactSheet.OpaqueBounds(f.Path, 4) is { } b)
+                    union = union is { } u ? SkiaSharp.SKRectI.Union(u, b) : b;
+            if (union is null) { summary.Add(new { animation = group.Key, frames = list.Count, empty = true }); continue; }
+
+            var first = RgbaImage.Load(list[0].Path);
+            int x = Math.Max(0, union.Value.Left - padding), y = Math.Max(0, union.Value.Top - padding);
+            int w = Math.Min(first.Width, union.Value.Right + padding) - x, h = Math.Min(first.Height, union.Value.Bottom + padding) - y;
+
+            // A grid no wider than MaxSheetWidth, frames left to right then top to bottom.
+            int columns = Math.Clamp(MaxSheetWidth / w, 1, list.Count);
+            int rowsNeeded = (list.Count + columns - 1) / columns;
+            var sheet = new RgbaImage(w * columns, h * rowsNeeded);
+            var animDir = Path.Combine(root, SafeName(group.Key));
+            Directory.CreateDirectory(animDir); // the preview pictures read these frames; removed again below when writeFrames is false
+            var framePaths = new List<string>();
+            for (int i = 0; i < list.Count; i++)
+            {
+                var cropped = RgbaImage.Load(list[i].Path).Crop(x, y, w, h);
+                int cellX = i % columns * w, cellY = i / columns * h;
+                for (int row = 0; row < h; row++)
+                    Buffer.BlockCopy(cropped.Pixels, row * w * 4, sheet.Pixels, ((cellY + row) * sheet.Width + cellX) * 4, w * 4);
+                var framePath = Path.Combine(animDir, $"{SafeName(group.Key)}_{i:D2}.png");
+                File.WriteAllBytes(framePath, cropped.EncodePng());
+                framePaths.Add(framePath);
+            }
+            File.WriteAllBytes(Path.Combine(root, $"{SafeName(group.Key)}_sheet.png"), sheet.EncodePng());
+
+            // Preview row: at most 10 frames spread over the animation.
+            int shown = Math.Min(10, list.Count);
+            var cells = Enumerable.Range(0, shown).Select(k => shown == 1 ? 0 : (int)Math.Round(k * (list.Count - 1.0) / (shown - 1)))
+                                  .Distinct().Select(i => new SheetCell($"{i / fps:0.00}s #{i}", framePaths[i])).ToList();
+            previewRows.Add((group.Key, $"{list.Count} frames {list.Count / fps:0.##}s {w}x{h}", cells));
+            summary.Add(new { animation = group.Key, frames = list.Count, seconds = Math.Round(list.Count / fps, 2),
+                              frameWidth = w, frameHeight = h, sheetColumns = columns, sheetRows = rowsNeeded });
+        }
+
+        // Grey preview pictures (8 animations each) for looking through, like spine_contact_sheet makes them.
+        foreach (var old in Directory.EnumerateFiles(root, "preview_*.png")) File.Delete(old);
+        if (previewRows.Count > 0)
+        {
+            const int cellHeight = 160;
+            var sizes = previewRows.Select(r => ContactSheet.ImageSize(r.Cells[0].ImagePath)).ToList();
+            double aspect = Math.Clamp(sizes.Where(c => c.Height > 0).Select(c => (double)c.Width / c.Height).DefaultIfEmpty(0.7).Max(), 0.5, 2.0);
+            for (int i = 0; i * 8 < previewRows.Count; i++)
+            {
+                var rows = previewRows.Skip(i * 8).Take(8).Select(r => new SheetRow(r.Title, r.Subtitle, r.Cells)).ToList();
+                File.WriteAllBytes(Path.Combine(root, $"preview_{i + 1:D2}.png"), ContactSheet.Render(rows, (int)Math.Round(cellHeight * aspect), cellHeight));
+            }
+        }
+        if (!writeFrames)
+            foreach (var dir in Directory.EnumerateDirectories(root)) Directory.Delete(dir, recursive: true);
+        return summary;
     }
 
     private static string SafeName(string name) =>
