@@ -86,6 +86,7 @@ stdio로 동작하며, 저장소 루트의 `.mcp.json`에 등록되어 있습니
 | `repack_parts` | 파츠 PNG 폴더를 다시 Spine/libgdx 아틀라스(`.atlas` + 페이지 PNG)로 묶습니다. |
 | `spine_contact_sheet` | `.skel`의 모든 애니메이션을 Spine 에디터 CLI로 렌더해 컨택트 시트(애니메이션별 한 줄, 프레임마다 시간 표시)로 만듭니다. |
 | `spine_render_batch` | 여러 장면의 스켈레톤을 한 번에 렌더합니다(기본: 노트 05~08·10~17의 `_air`/`_road`, `standby` 첫 프레임). 투명 배경으로 내용물만 잘라 `<출력>\<장면>\<스켈레톤>.png`로 저장합니다. 공중에 뜬 몬스터는 그림자가 수백 px 아래에 떨어져 있어서, 멀리 떨어진 납작한 그림자 덩어리는 크롭에서 뺍니다(몬스터 바로 아래 그림자는 유지). |
+| `spine_export_animations` | 스켈레톤 하나(보스 등)의 모든 애니메이션을 투명 PNG 프레임과 애니메이션별 스프라이트 시트(가로 8192px 이내 격자)로 뽑습니다. 한 애니메이션의 프레임은 같은 크기로 잘려 서로 정렬됩니다. `animations.json`에 프레임 수·fps·프레임 크기·시트 열/행을 적습니다. |
 | `spine_render_frames` | 시트에서 고른 프레임(`standby@0.50=cover`)을 최종 PNG로 렌더하고 `recipe.json`로 저장합니다. 레시피로 다시 렌더할 수도 있습니다. |
 
 번들 추출은 [AssetStudioMod](https://github.com/aelurum/AssetStudio) CLI를 호출합니다. `AssetStudioModCLI.exe` 경로를
