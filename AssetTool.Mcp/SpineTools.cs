@@ -256,6 +256,171 @@ public static class SpineTools
         }
     }
 
+    [McpServerTool(Name = "spine_render_batch", Destructive = false, Idempotent = true)]
+    [Description("Render one frame (default: standby at 0.0 s) of many Spine 3.8 skeletons at once to transparent-background PNGs, cropped to what is painted. " +
+                 "Built for the Muse Dash scene monsters: point rootDir at the folder holding the 장면NN folders (or at one 장면NN folder), choose scenes ('1-10,12') " +
+                 "and a skeleton name regex (default: notes 05-08 and 10-17, each as _air and _road, e.g. 0113_air = blue, 0113_road = pink). " +
+                 "Skeletons sharing a parts folder (the scene's sNN_atlas) are imported into one editor project, so a scene takes about 2-3 minutes instead of 1 minute per skeleton. " +
+                 "Output: <outputDir>\\<scene folder>\\<skeleton>.png. Skeletons without the animation, or without a parts folder, are listed, not rendered.")]
+    public static async Task<object> SpineRenderBatch(
+        [Description("Folder containing the 장면NN folders (each with 원본 and 파츠), or a single 장면NN folder.")] string rootDir,
+        [Description("Folder for the PNGs (<scene>\\<skeleton>.png) and the editor projects (_spine\\).")] string outputDir,
+        [Description("Scene numbers to do: 'all' (default) or e.g. '1-10,12'. Matches the number at the end of the scene folder name.")] string scenes = "all",
+        [Description("Regex on the skeleton file name without extension. Default '^\\d{2}(0[5-8]|1[0-7])_(air|road)$'.")] string skeletonPattern = @"^\d{2}(0[5-8]|1[0-7])_(air|road)$",
+        [Description("Animation to take the frame from. Default 'standby'.")] string animation = "standby",
+        [Description("Time in seconds inside the animation. Default 0 (first frame).")] double time = 0,
+        [Description("Skeleton scale on import. Default 0.5 (see spine_contact_sheet).")] double importScale = 0.5,
+        [Description("Crop each PNG to its painted area. Default true. When false every PNG has the scene-wide canvas.")] bool cropToContent = true,
+        [Description("Transparent pixels kept around the crop. Default 2.")] int padding = 2,
+        [Description("Sampling rate used only when time is above 0. Default 10.")] double fps = 10,
+        [Description("Path to Spine.com. Defaults to the SPINE_CLI environment variable, then C:\\Program Files\\Spine\\Spine.com.")] string? spineCliPath = null,
+        [Description("Spine editor version to run (-u). Default 3.8.99.")] string spineVersion = "3.8.99",
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (!Directory.Exists(rootDir))
+                return new { ok = false, error = $"폴더가 없습니다: {rootDir}" };
+            if (time < 0 || fps <= 0 || importScale <= 0 || padding < 0)
+                return new { ok = false, error = "time, fps, importScale, padding 값이 올바르지 않습니다." };
+            Regex pattern;
+            try { pattern = new Regex(skeletonPattern, RegexOptions.CultureInvariant); }
+            catch (ArgumentException ex) { return new { ok = false, error = $"skeletonPattern 정규식 오류: {ex.Message}" }; }
+            var wanted = ParseSceneNumbers(scenes, out var scenesError);
+            if (scenesError is not null) return new { ok = false, error = scenesError };
+
+            var sceneDirs = Directory.Exists(Path.Combine(rootDir, "원본"))
+                ? new List<string> { Path.GetFullPath(rootDir) }
+                : Directory.EnumerateDirectories(rootDir).Where(d => Directory.Exists(Path.Combine(d, "원본")))
+                           .OrderBy(d => d, StringComparer.OrdinalIgnoreCase).ToList();
+            sceneDirs = sceneDirs.Where(d => wanted is null || (TrailingNumber(Path.GetFileName(d)) is { } n && wanted.Contains(n))).ToList();
+            if (sceneDirs.Count == 0)
+                return new { ok = false, error = "해당하는 장면 폴더가 없습니다 (<장면 폴더>\\원본 구조여야 합니다)." };
+
+            var settings = new SpineSettings { CliPath = spineCliPath, Version = spineVersion, ImportScale = importScale };
+            // Frame 0 is all that is needed at time 0, so sample coarsely and keep the export small.
+            double sampleFps = time == 0 ? 1 : fps;
+
+            return await Task.Run<object>(() =>
+            {
+                var sceneResults = new List<object>();
+                int total = 0;
+                bool allOk = true;
+                foreach (var sceneDir in sceneDirs)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var sceneName = Path.GetFileName(sceneDir);
+                    var skels = Directory.EnumerateFiles(Path.Combine(sceneDir, "원본"), "*.skel")
+                                         .Where(f => pattern.IsMatch(Path.GetFileNameWithoutExtension(f)))
+                                         .OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToList();
+                    var rendered = new List<string>();
+                    var missingAnimation = new List<string>();
+                    var noParts = new List<string>();
+                    var empty = new List<string>();
+                    var warnings = new List<string>();
+                    string? error = null;
+
+                    try
+                    {
+                        var groups = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                        foreach (var skel in skels)
+                        {
+                            var parts = SpineRenderer.GuessPartsDir(skel);
+                            if (parts is null) { noParts.Add(Path.GetFileNameWithoutExtension(skel)); continue; }
+                            if (!groups.TryGetValue(parts, out var list)) groups[parts] = list = new List<string>();
+                            list.Add(skel);
+                        }
+
+                        int groupIndex = 0;
+                        foreach (var (partsDir, files) in groups)
+                        {
+                            var work = Path.Combine(outputDir, WorkFolder, sceneName, $"g{groupIndex++}");
+                            var project = SpineRenderer.PrepareMany(files, partsDir, work, settings, cancellationToken);
+                            var names = files.Select(f => Path.GetFileNameWithoutExtension(f)).ToList();
+                            var framesDir = Path.Combine(work, FramesFolder);
+                            // Without a crop every PNG needs the same scene-wide canvas; with it, tight per-frame bounds are far cheaper to export.
+                            var frames = SpineRenderer.ExportAllSkeletons(project, names, framesDir, sampleFps, maxBounds: !cropToContent, scalePercent: 100, cancellationToken);
+
+                            var outDir = Path.Combine(outputDir, sceneName);
+                            Directory.CreateDirectory(outDir);
+                            foreach (var name in names)
+                            {
+                                var own = frames.Where(f => f.Skeleton == name && f.Animation == animation).OrderBy(f => f.Index).ToList();
+                                if (own.Count == 0) { missingAnimation.Add(name); continue; }
+                                int index = Math.Clamp((int)Math.Round(time * sampleFps), 0, own[^1].Index);
+                                var source = own.First(f => f.Index == index).Path;
+                                var dest = Path.Combine(outDir, name + ".png");
+                                if (!SaveFrame(source, dest, cropToContent, padding)) { empty.Add(name); continue; }
+                                rendered.Add(name);
+                            }
+                            warnings.AddRange(project.Warnings.Where(w => !w.Contains("dimensions changed", StringComparison.OrdinalIgnoreCase)));
+                            Directory.Delete(framesDir, recursive: true); // full-canvas frames are large and not needed any more
+                        }
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex) { error = ex.Message; allOk = false; }
+
+                    total += rendered.Count;
+                    sceneResults.Add(new
+                    {
+                        scene = sceneName,
+                        matched = skels.Count,
+                        renderedCount = rendered.Count,
+                        rendered,
+                        missingAnimation,
+                        noPartsFolder = noParts,
+                        emptyImage = empty,
+                        warnings = warnings.Distinct().Take(10),
+                        error
+                    });
+                }
+                return new { ok = allOk, animation, time, importScale, totalRendered = total, outputDir = Path.GetFullPath(outputDir), scenes = sceneResults };
+            }, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return new { ok = false, error = "취소되었습니다. 일부 파일이 이미 출력됐을 수 있습니다." };
+        }
+        catch (Exception ex)
+        {
+            return new { ok = false, error = ex.Message };
+        }
+    }
+
+    // Writes the frame as a PNG, cropped to alpha > 4 plus padding. False if nothing is painted.
+    private static bool SaveFrame(string source, string dest, bool crop, int padding)
+    {
+        if (!crop) { File.Copy(source, dest, overwrite: true); return true; }
+        if (ContactSheet.OpaqueBounds(source, 4) is not { } b) return false;
+        var image = RgbaImage.Load(source);
+        int x = Math.Max(0, b.Left - padding), y = Math.Max(0, b.Top - padding);
+        int right = Math.Min(image.Width, b.Right + padding), bottom = Math.Min(image.Height, b.Bottom + padding);
+        File.WriteAllBytes(dest, image.Crop(x, y, right - x, bottom - y).EncodePng());
+        return true;
+    }
+
+    private static int? TrailingNumber(string name)
+    {
+        var m = Regex.Match(name, @"(\d+)$");
+        return m.Success ? int.Parse(m.Groups[1].Value) : null;
+    }
+
+    // "all" -> null (no filter); "1-10,12" -> {1..10, 12}
+    private static HashSet<int>? ParseSceneNumbers(string spec, out string? error)
+    {
+        error = null;
+        if (string.IsNullOrWhiteSpace(spec) || spec.Trim().Equals("all", StringComparison.OrdinalIgnoreCase)) return null;
+        var set = new HashSet<int>();
+        foreach (var part in spec.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var m = Regex.Match(part, @"^(\d+)(?:-(\d+))?$");
+            if (!m.Success) { error = $"scenes 형식이 올바르지 않습니다: '{part}'. 예: 1-10,12"; return null; }
+            int a = int.Parse(m.Groups[1].Value), b = m.Groups[2].Success ? int.Parse(m.Groups[2].Value) : a;
+            for (int n = Math.Min(a, b); n <= Math.Max(a, b); n++) set.Add(n);
+        }
+        return set;
+    }
+
     private static string? ResolveParts(string skelPath, string? partsDir, out string error)
     {
         error = "";

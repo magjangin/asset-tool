@@ -35,6 +35,8 @@ namespace asset_tool
 
     public sealed class SpineFrame
     {
+        // Set by multi-skeleton exports.
+        public string Skeleton = "";
         public string Animation = "";
         public int Index;
         public string Path = "";
@@ -66,7 +68,21 @@ namespace asset_tool
             if (Directory.GetParent(dir) is { } bundle)
                 candidates.Add(Path.Combine(bundle.FullName, "파츠", stem));
             candidates.Add(Path.Combine(dir, stem));
-            return candidates.FirstOrDefault(Directory.Exists);
+            var own = candidates.FirstOrDefault(Directory.Exists);
+            if (own is not null) return own;
+
+            // Scene skeletons such as 0105_air have no atlas of their own: their regions
+            // ("0105/images/body") live in a shared atlas, <bundle>\파츠\s01_atlas\0105\...
+            var prefix = Regex.Match(stem, @"^\d+").Value;
+            if (prefix.Length > 0 && Directory.GetParent(dir) is { } parent && Directory.Exists(Path.Combine(parent.FullName, "파츠")))
+                // Prefer the shared "...atlas" folder: a per-skeleton folder such as 0108_air_double also
+                // contains a "0108" subfolder but holds only that variant's parts.
+                return Directory.EnumerateDirectories(Path.Combine(parent.FullName, "파츠"))
+                                .Where(d => Directory.Exists(Path.Combine(d, prefix)))
+                                .OrderBy(d => Path.GetFileName(d).Contains("atlas", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                                .ThenBy(d => d, StringComparer.OrdinalIgnoreCase)
+                                .FirstOrDefault();
+            return null;
         }
 
         public static SpineProject Prepare(string skelPath, string partsDir, string workDir,
@@ -110,7 +126,7 @@ namespace asset_tool
             var skelCopy = Path.Combine(rawDir, name + ".skel");
             File.Copy(skelPath, skelCopy, overwrite: true);
             var rawProject = Path.Combine(rawDir, name + ".spine");
-            RunChecked(cli, settings, workDir, new[] { "-i", skelCopy, "-o", rawProject, "-r" }, rawProject, "스켈레톤 가져오기", warnings, ct);
+            RunChecked(cli, settings, workDir, new[] { "-i", skelCopy, "-o", rawProject, "-r" }, rawProject, "스켈레톤 가져오기", new List<string>(), ct);
 
             // 2. project -> JSON, with the editor-only data (images path) included.
             var exportJson = WriteSettings(workDir, "export_json.json", new Dictionary<string, object?>
@@ -119,7 +135,7 @@ namespace asset_tool
                 ["nonessential"] = true, ["cleanUp"] = false, ["output"] = "single"
             });
             var json = Path.Combine(jsonDir, name + ".json");
-            RunChecked(cli, settings, workDir, new[] { "-i", rawProject, "-o", jsonDir, "-e", exportJson }, json, "JSON 내보내기", warnings, ct);
+            RunChecked(cli, settings, workDir, new[] { "-i", rawProject, "-o", jsonDir, "-e", exportJson }, json, "JSON 내보내기", new List<string>(), ct); // images path is still unset here: its "not found" lines are noise
 
             // 3. point the skeleton at the part PNGs.
             var root = JsonNode.Parse(File.ReadAllText(json, Encoding.UTF8))
@@ -135,6 +151,100 @@ namespace asset_tool
             project.Warnings = warnings.Distinct().ToList();
             File.WriteAllText(metaPath, new JsonObject { ["key"] = key }.ToJsonString());
             return project;
+        }
+
+        // Several skeletons that share one parts folder go into a single project, so a whole
+        // scene costs a handful of editor starts instead of four per skeleton.
+        // Skeletons keep their file names; the project is <workDir>\scene.spine.
+        public static SpineProject PrepareMany(IReadOnlyList<string> skelPaths, string partsDir, string workDir,
+                                               SpineSettings settings, CancellationToken ct)
+        {
+            var cli = FindCli(settings.CliPath)
+                ?? throw new FileNotFoundException($"Spine.com을 찾을 수 없습니다. spineCliPath를 주거나 환경변수 {CliEnvVar}를 설정하세요.");
+            partsDir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(partsDir));
+            workDir = Path.GetFullPath(workDir);
+            Directory.CreateDirectory(workDir);
+            var project = new SpineProject
+            {
+                Name = "scene", PartsDir = partsDir, WorkDir = workDir, Settings = settings, CliPath = cli,
+                ProjectPath = Path.Combine(workDir, "scene.spine")
+            };
+
+            var skels = skelPaths.Select(Path.GetFullPath).OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList();
+            var key = string.Join("|", skels.Select(p => { var f = new FileInfo(p); return $"{f.Name}:{f.Length}:{f.LastWriteTimeUtc.Ticks}"; })
+                                       .Append(partsDir)
+                                       .Append(settings.ImportScale.ToString(CultureInfo.InvariantCulture))
+                                       .Append(settings.Version));
+            var metaPath = Path.Combine(workDir, "prepared.json");
+            if (File.Exists(project.ProjectPath) && File.Exists(metaPath) &&
+                JsonNode.Parse(File.ReadAllText(metaPath))?["key"]?.GetValue<string>() == key)
+                return project;
+
+            var skelDir = Path.Combine(workDir, "skel");
+            var rawDir = Path.Combine(workDir, "raw");
+            var jsonDir = Path.Combine(workDir, "json");
+            var patchedDir = Path.Combine(workDir, "patched");
+            foreach (var d in new[] { skelDir, rawDir, jsonDir, patchedDir })
+            {
+                if (Directory.Exists(d)) Directory.Delete(d, recursive: true);
+                Directory.CreateDirectory(d);
+            }
+            if (File.Exists(project.ProjectPath)) File.Delete(project.ProjectPath);
+            foreach (var s in skels) File.Copy(s, Path.Combine(skelDir, Path.GetFileName(s)), overwrite: true);
+
+            var rawProject = Path.Combine(rawDir, "scene.spine");
+            RunChecked(cli, settings, workDir, new[] { "-i", skelDir, "-o", rawProject, "-r" }, rawProject, "스켈레톤 가져오기", new List<string>(), ct);
+
+            var exportJson = WriteSettings(workDir, "export_json.json", new Dictionary<string, object?>
+            {
+                ["class"] = "export-json", ["extension"] = ".json", ["format"] = "JSON",
+                ["nonessential"] = true, ["cleanUp"] = false, ["output"] = "single"
+            });
+            RunChecked(cli, settings, workDir, new[] { "-i", rawProject, "-o", jsonDir, "-e", exportJson }, null, "JSON 내보내기", new List<string>(), ct);
+
+            foreach (var s in skels)
+            {
+                var json = Path.Combine(jsonDir, Path.GetFileNameWithoutExtension(s) + ".json");
+                if (!File.Exists(json)) throw new InvalidOperationException($"JSON 내보내기에서 빠진 스켈레톤: {Path.GetFileName(s)}");
+                var root = JsonNode.Parse(File.ReadAllText(json, Encoding.UTF8)) ?? throw new InvalidDataException("스켈레톤 JSON을 읽을 수 없습니다.");
+                (root["skeleton"] ??= new JsonObject())["images"] = partsDir;
+                File.WriteAllText(Path.Combine(patchedDir, Path.GetFileName(json)), root.ToJsonString(), new UTF8Encoding(false));
+            }
+
+            var warnings = new List<string>();
+            RunChecked(cli, settings, workDir, new[] { "-i", patchedDir, "-s", settings.ImportScale.ToString(CultureInfo.InvariantCulture),
+                                                       "-o", project.ProjectPath, "-r" }, project.ProjectPath, "프로젝트 만들기", warnings, ct);
+            project.Warnings = warnings.Distinct().ToList();
+            File.WriteAllText(metaPath, new JsonObject { ["key"] = key }.ToJsonString());
+            return project;
+        }
+
+        // Every animation of every skeleton in one run: <framesDir>\<skeleton>-<animation>_NN.png
+        public static List<SpineFrame> ExportAllSkeletons(SpineProject project, IReadOnlyCollection<string> skeletons, string framesDir,
+                                                          double fps, bool maxBounds, int scalePercent, CancellationToken ct)
+        {
+            if (Directory.Exists(framesDir)) Directory.Delete(framesDir, recursive: true);
+            Directory.CreateDirectory(framesDir);
+            var settings = WriteSettings(project.WorkDir, "export_png_scene.json", new Dictionary<string, object?>
+            {
+                ["class"] = "export-png", ["exportType"] = "animation", ["skeletonType"] = "all", ["animationType"] = "all",
+                ["fps"] = fps, ["maxBounds"] = maxBounds, ["scale"] = scalePercent
+            });
+            var warnings = new List<string>();
+            RunChecked(project.CliPath, project.Settings, project.WorkDir, new[] { "-i", project.ProjectPath, "-o", framesDir, "-e", settings },
+                       null, "PNG 내보내기", warnings, ct);
+            project.Warnings = project.Warnings.Concat(warnings).Distinct().ToList();
+
+            var frames = new List<SpineFrame>();
+            foreach (var f in Directory.EnumerateFiles(framesDir, "*.png"))
+            {
+                var stem = Path.GetFileNameWithoutExtension(f);
+                var skeleton = skeletons.FirstOrDefault(s => stem.StartsWith(s + "-", StringComparison.Ordinal));
+                if (skeleton is null) continue;
+                var m = Regex.Match(stem[(skeleton.Length + 1)..], @"^(.*)_(\d+)$");
+                if (m.Success) frames.Add(new SpineFrame { Skeleton = skeleton, Animation = m.Groups[1].Value, Index = int.Parse(m.Groups[2].Value), Path = f });
+            }
+            return frames;
         }
 
         // Every animation in one CLI run: <framesDir>\<skeleton>-<animation>_NN.png
