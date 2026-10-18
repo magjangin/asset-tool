@@ -17,6 +17,8 @@ public static class SpineTools
     private const string RecipeFile = "recipe.json";
     // About 50 skeletons overflowed an 8 GB editor heap; 18 per project stays far below it.
     private const int MaxSkeletonsPerProject = 18;
+    // Widest sprite sheet spine_export_animations writes (many tools refuse images beyond 16384 px).
+    private const int MaxSheetWidth = 8192;
 
     [McpServerTool(Name = "spine_contact_sheet", Destructive = false, Idempotent = true)]
     [Description("Render every animation of a Spine 3.8 skeleton (.skel) to PNG frames with the Spine editor CLI (Spine.com, needs the " +
@@ -601,6 +603,108 @@ public static class SpineTools
         }
         return set;
     }
+
+    [McpServerTool(Name = "spine_export_animations", Destructive = false, Idempotent = true)]
+    [Description("Export every animation of one Spine 3.8 skeleton as transparent PNG frames plus a sprite sheet grid per animation (at most 8192 px wide; game-ready, unlike the grey " +
+                 "contact sheets of spine_contact_sheet). All frames of an animation are cropped to the same rectangle (the union of what that animation paints, plus padding), " +
+                 "so they line up and can be played back without jitter. Output: <outputDir>\\<animation>\\<animation>_NN.png, <outputDir>\\<animation>_sheet.png " +
+                 "and <outputDir>\\animations.json (frames, fps, frame size per animation). Needs the licensed Spine editor; takes a few minutes for a boss.")]
+    public static async Task<object> SpineExportAnimations(
+        [Description("Path to the .skel file.")] string skelPath,
+        [Description("Folder for the animation folders, sheets and animations.json (created if missing).")] string outputDir,
+        [Description("Folder holding the part PNGs. Default: <bundle>\\파츠\\<skel name>, else the scene's shared sNN_atlas.")] string? partsDir = null,
+        [Description("Comma-separated animation names. Default: all.")] string? animations = null,
+        [Description("Frames per second. Default 12.")] double fps = 12,
+        [Description("Skeleton scale on import. Default 0.5 (see spine_contact_sheet).")] double importScale = 0.5,
+        [Description("Output size in percent of the imported skeleton. Default 100.")] int scalePercent = 100,
+        [Description("Transparent pixels kept around each animation's rectangle. Default 4.")] int padding = 4,
+        [Description("Also write the single frames as PNG files (not only the sheets). Default true.")] bool writeFrames = true,
+        [Description("Path to Spine.com. Defaults to the SPINE_CLI environment variable, then C:\\Program Files\\Spine\\Spine.com.")] string? spineCliPath = null,
+        [Description("Spine editor version to run (-u). Default 3.8.99.")] string spineVersion = "3.8.99",
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (!File.Exists(skelPath))
+                return new { ok = false, error = $"파일이 없습니다: {skelPath}" };
+            if (fps <= 0 || importScale <= 0 || scalePercent <= 0 || padding < 0)
+                return new { ok = false, error = "fps, importScale, scalePercent, padding 값이 올바르지 않습니다." };
+            var parts = ResolveParts(skelPath, partsDir, out var partsError);
+            if (parts is null) return new { ok = false, error = partsError };
+
+            var settings = new SpineSettings { CliPath = spineCliPath, Version = spineVersion, ImportScale = importScale };
+            var work = Path.Combine(outputDir, WorkFolder);
+            var wanted = SplitNames(animations);
+
+            return await Task.Run<object>(() =>
+            {
+                var project = SpineRenderer.Prepare(skelPath, parts, work, settings, cancellationToken);
+                // One canvas for the whole export keeps every frame aligned; each animation is then cropped to its own rectangle.
+                var framesDir = Path.Combine(work, FramesFolder);
+                var frames = SpineRenderer.ExportAll(project, framesDir, fps, maxBounds: true, scalePercent, cancellationToken);
+
+                Directory.CreateDirectory(outputDir);
+                var summary = new List<object>();
+                foreach (var group in frames.GroupBy(f => f.Animation).OrderBy(g => g.Key, StringComparer.Ordinal))
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (wanted.Count > 0 && !wanted.Contains(group.Key)) continue;
+                    var list = group.OrderBy(f => f.Index).ToList();
+
+                    SkiaSharp.SKRectI? union = null;
+                    foreach (var f in list)
+                        if (ContactSheet.OpaqueBounds(f.Path, 4) is { } b)
+                            union = union is { } u ? SkiaSharp.SKRectI.Union(u, b) : b;
+                    if (union is null) { summary.Add(new { animation = group.Key, frames = list.Count, empty = true }); continue; }
+
+                    var first = RgbaImage.Load(list[0].Path);
+                    int x = Math.Max(0, union.Value.Left - padding), y = Math.Max(0, union.Value.Top - padding);
+                    int w = Math.Min(first.Width, union.Value.Right + padding) - x, h = Math.Min(first.Height, union.Value.Bottom + padding) - y;
+
+                    // A grid no wider than MaxSheetWidth, frames left to right then top to bottom.
+                    int columns = Math.Clamp(MaxSheetWidth / w, 1, list.Count);
+                    int rowsNeeded = (list.Count + columns - 1) / columns;
+                    var sheet = new RgbaImage(w * columns, h * rowsNeeded);
+                    var animDir = Path.Combine(outputDir, SafeName(group.Key));
+                    if (writeFrames) Directory.CreateDirectory(animDir);
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        var cropped = RgbaImage.Load(list[i].Path).Crop(x, y, w, h);
+                        int cellX = i % columns * w, cellY = i / columns * h;
+                        for (int row = 0; row < h; row++)
+                            Buffer.BlockCopy(cropped.Pixels, row * w * 4, sheet.Pixels, ((cellY + row) * sheet.Width + cellX) * 4, w * 4);
+                        if (writeFrames)
+                            File.WriteAllBytes(Path.Combine(animDir, $"{SafeName(group.Key)}_{i:D2}.png"), cropped.EncodePng());
+                    }
+                    File.WriteAllBytes(Path.Combine(outputDir, $"{SafeName(group.Key)}_sheet.png"), sheet.EncodePng());
+                    summary.Add(new { animation = group.Key, frames = list.Count, seconds = Math.Round(list.Count / fps, 2),
+                                      frameWidth = w, frameHeight = h, sheetColumns = columns, sheetRows = rowsNeeded });
+                }
+
+                var meta = new { skeleton = project.Name, fps, importScale, scalePercent, partsDir = project.PartsDir, animations = summary };
+                File.WriteAllText(Path.Combine(outputDir, "animations.json"),
+                                  System.Text.Json.JsonSerializer.Serialize(meta, new System.Text.Json.JsonSerializerOptions
+                                  {
+                                      WriteIndented = true,
+                                      Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+                                  }), new System.Text.UTF8Encoding(false));
+                Directory.Delete(framesDir, recursive: true); // full-canvas frames are large and not needed any more
+                return new { ok = true, skeleton = project.Name, fps, animationCount = summary.Count, animations = summary,
+                             outputDir = Path.GetFullPath(outputDir), warnings = project.Warnings.Where(w => !w.Contains("dimensions changed", StringComparison.OrdinalIgnoreCase)).Take(10) };
+            }, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return new { ok = false, error = "취소되었습니다. 일부 파일이 이미 출력됐을 수 있습니다." };
+        }
+        catch (Exception ex)
+        {
+            return new { ok = false, error = ex.Message };
+        }
+    }
+
+    private static string SafeName(string name) =>
+        Regex.Replace(name, "[" + Regex.Escape(new string(Path.GetInvalidFileNameChars())) + "]", "_");
 
     private static string? ResolveParts(string skelPath, string? partsDir, out string error)
     {
