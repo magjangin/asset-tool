@@ -15,6 +15,8 @@ public static class SpineTools
     private const string SheetsFolder = "sheets";
     private const string PickedFolder = "picked";
     private const string RecipeFile = "recipe.json";
+    // About 50 skeletons overflowed an 8 GB editor heap; 18 per project stays far below it.
+    private const int MaxSkeletonsPerProject = 18;
 
     [McpServerTool(Name = "spine_contact_sheet", Destructive = false, Idempotent = true)]
     [Description("Render every animation of a Spine 3.8 skeleton (.skel) to PNG frames with the Spine editor CLI (Spine.com, needs the " +
@@ -273,12 +275,22 @@ public static class SpineTools
         [Description("Crop each PNG to its painted area. Default true. When false every PNG has the scene-wide canvas.")] bool cropToContent = true,
         [Description("Transparent pixels kept around the crop. Default 2.")] int padding = 2,
         [Description("Sampling rate used only when time is above 0. Default 10.")] double fps = 10,
+        [Description("'all' (default): a skeleton with skins besides 'default' is rendered once per skin as <skeleton>__<skin>.png " +
+                     "(Muse Dash keeps some body parts only in skins such as origin/xiemei/Miku/RinLen; without this a note like 0914 shows only its shadow). " +
+                     "The plain <skeleton>.png is written only when its default skin is complete. 'default': skeletons as they are, skins untouched.")] string skins = "all",
         [Description("Path to Spine.com. Defaults to the SPINE_CLI environment variable, then C:\\Program Files\\Spine\\Spine.com.")] string? spineCliPath = null,
         [Description("Spine editor version to run (-u). Default 3.8.99.")] string spineVersion = "3.8.99",
         CancellationToken cancellationToken = default)
     {
         try
         {
+            bool includeSkins;
+            switch (skins.Trim().ToLowerInvariant())
+            {
+                case "all": includeSkins = true; break;
+                case "default": includeSkins = false; break;
+                default: return new { ok = false, error = "skins는 all 또는 default여야 합니다." };
+            }
             if (!Directory.Exists(rootDir))
                 return new { ok = false, error = $"폴더가 없습니다: {rootDir}" };
             if (time < 0 || fps <= 0 || importScale <= 0 || padding < 0)
@@ -317,6 +329,7 @@ public static class SpineTools
                     var missingAnimation = new List<string>();
                     var noParts = new List<string>();
                     var empty = new List<string>();
+                    var skinVariants = new List<string>();
                     var warnings = new List<string>();
                     string? error = null;
 
@@ -331,12 +344,35 @@ public static class SpineTools
                             list.Add(skel);
                         }
 
-                        int groupIndex = 0;
+                        // One editor project holds all its skeletons at once, so memory grows with their number
+                        // (skin variants included): keep each project to about MaxSkeletonsPerProject.
+                        var chunks = new List<(string PartsDir, List<string> Files)>();
                         foreach (var (partsDir, files) in groups)
                         {
+                            var current = new List<string>();
+                            int cost = 0;
+                            foreach (var file in files)
+                            {
+                                int fileCost = 1 + (includeSkins ? SkelSkinReader.TryRead(file)?.ExtraSkins.Count ?? 0 : 0);
+                                if (current.Count > 0 && cost + fileCost > MaxSkeletonsPerProject)
+                                {
+                                    chunks.Add((partsDir, current));
+                                    current = new List<string>();
+                                    cost = 0;
+                                }
+                                current.Add(file);
+                                cost += fileCost;
+                            }
+                            if (current.Count > 0) chunks.Add((partsDir, current));
+                        }
+
+                        int groupIndex = 0;
+                        foreach (var (partsDir, files) in chunks)
+                        {
                             var work = Path.Combine(outputDir, WorkFolder, sceneName, $"g{groupIndex++}");
-                            var project = SpineRenderer.PrepareMany(files, partsDir, work, settings, cancellationToken);
-                            var names = files.Select(f => Path.GetFileNameWithoutExtension(f)).ToList();
+                            var project = SpineRenderer.PrepareMany(files, partsDir, work, settings, includeSkins, cancellationToken);
+                            var names = project.Skeletons;
+                            skinVariants.AddRange(names.Where(n => n.Contains("__")));
                             var framesDir = Path.Combine(work, FramesFolder);
                             // Without a crop every PNG needs the same scene-wide canvas; with it, tight per-frame bounds are far cheaper to export.
                             var frames = SpineRenderer.ExportAllSkeletons(project, names, framesDir, sampleFps, maxBounds: !cropToContent, scalePercent: 100, cancellationToken);
@@ -360,6 +396,12 @@ public static class SpineTools
                     catch (OperationCanceledException) { throw; }
                     catch (Exception ex) { error = ex.Message; allOk = false; }
 
+                    // A skeleton that now only has skin variants may still have a plain file from an earlier run
+                    // (typically just its shadow). Report those, never delete them.
+                    var stale = skinVariants.Select(v => v[..v.IndexOf("__", StringComparison.Ordinal)]).Distinct()
+                                            .Where(b => !rendered.Contains(b) && File.Exists(Path.Combine(outputDir, sceneName, b + ".png")))
+                                            .ToList();
+
                     total += rendered.Count;
                     sceneResults.Add(new
                     {
@@ -370,6 +412,8 @@ public static class SpineTools
                         missingAnimation,
                         noPartsFolder = noParts,
                         emptyImage = empty,
+                        skinVariants,
+                        stalePlainFiles = stale,
                         warnings = warnings.Distinct().Take(10),
                         error
                     });
