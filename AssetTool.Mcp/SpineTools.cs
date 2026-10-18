@@ -394,25 +394,18 @@ public static class SpineTools
 
                             var outDir = Path.Combine(outputDir, sceneName);
                             Directory.CreateDirectory(outDir);
+                            var picked = pickLargest
+                                ? PickLargestFrames(names, frames, candidatePattern)
+                                : new Dictionary<string, SpineFrame>();
+
                             foreach (var name in names)
                             {
                                 string source;
                                 if (pickLargest)
                                 {
-                                    // The standby loop of some notes starts squashed, and notes that only have in_* animations
-                                    // start hidden: take the frame where the most is painted.
-                                    var mine = frames.Where(f => f.Skeleton == name).ToList();
-                                    var candidates = mine.Where(f => candidatePattern.IsMatch(f.Animation)).ToList();
-                                    // No standby: use the last frame of each remaining animation, where the character has settled
-                                    // (a mid-way frame of an in_* animation can still be falling in on a long string).
-                                    if (candidates.Count == 0)
-                                        candidates = mine.Where(f => !f.Animation.StartsWith("out", StringComparison.OrdinalIgnoreCase))
-                                                         .GroupBy(f => f.Animation).Select(g => g.MaxBy(f => f.Index)!).ToList();
-                                    if (candidates.Count == 0) { missingAnimation.Add(name); continue; }
-                                    var best = candidates.Select(f => (Frame: f, Mass: PaintedMass(f.Path)))
-                                                         .OrderByDescending(x => x.Mass).ThenBy(x => x.Frame.Animation, StringComparer.Ordinal).ThenBy(x => x.Frame.Index).First();
-                                    source = best.Frame.Path;
-                                    chosen.Add($"{name} = {best.Frame.Animation}@{best.Frame.Index / sampleFps:0.00}");
+                                    if (!picked.TryGetValue(name, out var best)) { missingAnimation.Add(name); continue; }
+                                    source = best.Path;
+                                    chosen.Add($"{name} = {best.Animation}@{best.Index / sampleFps:0.00}");
                                 }
                                 else
                                 {
@@ -466,6 +459,52 @@ public static class SpineTools
         {
             return new { ok = false, error = ex.Message };
         }
+    }
+
+    // pick='largest'. The frame with the most painted pixels among the candidate animations; with none, among the last
+    // frame of every animation except out_* (a mid-way frame of an in_* animation can still be falling in on a long string).
+    // The _air and _road versions of a note (and the same skin) share one animation and time, otherwise their poses differ:
+    // the two skeletons have the same animation names with different lengths, so each alone would pick another moment.
+    private static Dictionary<string, SpineFrame> PickLargestFrames(IReadOnlyList<string> names, IReadOnlyList<SpineFrame> frames, Regex candidatePattern)
+    {
+        var masses = new Dictionary<string, long>();
+        long Mass(SpineFrame f) => masses.TryGetValue(f.Path, out var m) ? m : masses[f.Path] = PaintedMass(f.Path);
+
+        // Sampled frames of a candidate animation are matched by animation and frame number; the "last frame of each
+        // animation" fallback by animation name alone, since the pair's animations differ in length.
+        (List<SpineFrame> Frames, bool LastFrames) Candidates(string name)
+        {
+            var mine = frames.Where(f => f.Skeleton == name).ToList();
+            var found = mine.Where(f => candidatePattern.IsMatch(f.Animation)).ToList();
+            if (found.Count > 0) return (found, false);
+            return (mine.Where(f => !f.Animation.StartsWith("out", StringComparison.OrdinalIgnoreCase))
+                        .GroupBy(f => f.Animation).Select(g => g.MaxBy(f => f.Index)!).ToList(), true);
+        }
+        static string Key(SpineFrame f, bool lastFrames) => lastFrames ? f.Animation : $"{f.Animation}@{f.Index}";
+
+        var result = new Dictionary<string, SpineFrame>();
+        // "0108_air" and "0108_road" -> "0108_*"; "0916_air__origin" -> "0916_*__origin"
+        foreach (var pair in names.GroupBy(n => Regex.Replace(n, "_(air|road)", "_*", RegexOptions.None)))
+        {
+            var members = pair.ToDictionary(n => n, Candidates);
+            if (members.Values.Any(c => c.Frames.Count == 0)) continue;
+
+            var shared = members.Values.Select(c => c.Frames.Select(f => Key(f, c.LastFrames)).ToHashSet())
+                                .Aggregate((a, b) => { a.IntersectWith(b); return a; });
+            if (members.Count > 1 && shared.Count > 0)
+            {
+                var best = shared.OrderByDescending(k => members.Values.Sum(c => Mass(c.Frames.First(f => Key(f, c.LastFrames) == k))))
+                                 .ThenBy(k => k, StringComparer.Ordinal).First();
+                foreach (var (name, c) in members)
+                    result[name] = c.Frames.First(f => Key(f, c.LastFrames) == best);
+            }
+            else
+            {
+                foreach (var (name, c) in members)
+                    result[name] = c.Frames.OrderByDescending(Mass).ThenBy(f => f.Animation, StringComparer.Ordinal).ThenBy(f => f.Index).First();
+            }
+        }
+        return result;
     }
 
     // Number of clearly visible pixels (alpha > 24): how much of the character is on screen in this frame.
