@@ -184,7 +184,7 @@ namespace asset_tool
                                        .Append(partsDir)
                                        .Append(settings.ImportScale.ToString(CultureInfo.InvariantCulture))
                                        .Append(settings.Version)
-                                       .Append(skinVariants ? "skins2" : "noskins"));
+                                       .Append(skinVariants ? "skins3" : "noskins"));
             var metaPath = Path.Combine(workDir, "prepared.json");
             if (File.Exists(project.ProjectPath) && File.Exists(metaPath) &&
                 JsonNode.Parse(File.ReadAllText(metaPath)) is { } meta && meta["key"]?.GetValue<string>() == key &&
@@ -280,6 +280,7 @@ namespace asset_tool
         {
             var copy = skeletonJson.DeepClone();
             copy["skins"] = new JsonArray(CloneDefaultSkin(copy));
+            RekeyDeform(copy, null);
             return copy;
         }
 
@@ -310,12 +311,67 @@ namespace asset_tool
                     }
                 }
             }
+            ResolveLinkedMeshes(skeletonJson, defAttachments);
             copy["skins"] = new JsonArray(def);
+            RekeyDeform(copy, skin);
             foreach (var listName in new[] { "bones", "ik", "transform", "path" })
                 if (copy[listName] is JsonArray list)
                     foreach (var item in list)
                         (item as JsonObject)?.Remove("skin");
             return copy;
+        }
+
+        // A linked mesh borrows the geometry of a parent mesh, possibly from another skin that no longer exists
+        // in the variant (RinLen's body points at Miku's body). Turn it into a plain mesh carrying that geometry.
+        private static void ResolveLinkedMeshes(JsonNode originalSkeleton, JsonObject defaultAttachments)
+        {
+            foreach (var (slot, atts) in defaultAttachments.ToList())
+            {
+                if (atts is not JsonObject items) continue;
+                foreach (var (key, att) in items.ToList())
+                {
+                    if (att is not JsonObject linked || linked["type"]?.GetValue<string>() != "linkedmesh") continue;
+                    var parentName = linked["parent"]?.GetValue<string>();
+                    var parentSkin = linked["skin"]?.GetValue<string>() ?? "default";
+                    if (parentName is null) continue;
+                    if (SkinAttachments(originalSkeleton, parentSkin)?[slot]?[parentName] is not JsonObject parent) continue;
+                    if (parent["type"]?.GetValue<string>() is not ("mesh" or null)) continue;
+
+                    var mesh = (JsonObject)parent.DeepClone();
+                    mesh["name"] = key;
+                    mesh["path"] = linked["path"]?.DeepClone() ?? linked["name"]?.DeepClone() ?? JsonValue.Create(key);
+                    mesh["type"] = "mesh";
+                    foreach (var field in new[] { "color", "width", "height" })
+                        if (linked[field] is { } v) mesh[field] = v.DeepClone();
+                    items[key] = mesh;
+                }
+            }
+        }
+
+        // Deform timelines are keyed by skin name. Keep the default skin's and fold the chosen skin's into it;
+        // timelines for skins that were removed make the file unreadable.
+        private static void RekeyDeform(JsonNode skeleton, string? mergedSkin)
+        {
+            if (skeleton["animations"] is not JsonObject animations) return;
+            foreach (var (_, animation) in animations.ToList())
+            {
+                if (animation?["deform"] is not JsonObject deform) continue;
+                var merged = deform["default"] as JsonObject ?? new JsonObject();
+                if (mergedSkin is not null && deform[mergedSkin] is JsonObject fromSkin)
+                {
+                    foreach (var (slot, byAttachment) in fromSkin.ToList())
+                    {
+                        var target = merged[slot] as JsonObject ?? (JsonObject)(merged[slot] = new JsonObject())!;
+                        if (byAttachment is JsonObject atts)
+                            foreach (var (attName, timeline) in atts.ToList())
+                                target[attName] = timeline?.DeepClone();
+                    }
+                }
+                foreach (var key in deform.Select(kv => kv.Key).ToList())
+                    deform.Remove(key);
+                if (merged.Count > 0) deform["default"] = merged;
+                if (deform.Count == 0) ((JsonObject)animation).Remove("deform");
+            }
         }
 
         // Every animation of every skeleton in one run: <framesDir>\<skeleton>-<animation>_NN.png
