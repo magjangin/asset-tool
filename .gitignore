@@ -10,3 +10,6 @@ obj/
 
 # Local Claude Code settings
 .claude/settings.local.json
+
+# Spine launcher unpacks its libraries here
+.temp/

@@ -84,6 +84,8 @@ stdio로 동작하며, 저장소 루트의 `.mcp.json`에 등록되어 있습니
 | `extract_unity_bundles` | Unity 번들에서 Texture2D·TextAsset을 AssetStudioMod CLI로 추출합니다(번들별 하위 폴더). |
 | `extract_and_split` | 번들 추출부터 파츠 분리까지 한 번에 처리합니다. 번들마다 `파츠\`(아틀라스 이름별 파츠), `스프라이트\`(아틀라스 없는 낱개 이미지: 롱노트·콜라보 스킨 노트·히트 포인트·배경 등), `원본\`(`.atlas`, `.skel`, 페이지 PNG) 폴더를 만듭니다. |
 | `repack_parts` | 파츠 PNG 폴더를 다시 Spine/libgdx 아틀라스(`.atlas` + 페이지 PNG)로 묶습니다. |
+| `spine_contact_sheet` | `.skel`의 모든 애니메이션을 Spine 에디터 CLI로 렌더해 컨택트 시트(애니메이션별 한 줄, 프레임마다 시간 표시)로 만듭니다. |
+| `spine_render_frames` | 시트에서 고른 프레임(`standby@0.50=cover`)을 최종 PNG로 렌더하고 `recipe.json`로 저장합니다. 레시피로 다시 렌더할 수도 있습니다. |
 
 번들 추출은 [AssetStudioMod](https://github.com/aelurum/AssetStudio) CLI를 호출합니다. `AssetStudioModCLI.exe` 경로를
 환경변수 `ASSETSTUDIO_CLI`(`.mcp.json`의 `env`)나 도구의 `cliPath`로 알려 주세요.
@@ -97,6 +99,19 @@ stdio로 동작하며, 저장소 루트의 `.mcp.json`에 등록되어 있습니
 - 페이지는 기본 2048까지, 2의 거듭제곱 크기로 만들며 넘치면 `이름2.png`로 이어집니다. 파츠 사이 여백은 기본 2px입니다.
 - 검증: 뮤즈대시 아틀라스 125개(파츠 4681개)를 분리 → 리패킹 → 다시 분리해 비교했더니 보이는 픽셀이 100% 같았습니다.
 - 한계: 회전·폴리곤 패킹을 쓰지 않아서 원본 아틀라스보다 페이지가 커질 수 있습니다(`powerOfTwo=false`로 줄일 수 있음). 스켈레톤(`.skel`)은 건드리지 않습니다.
+
+### 보스·노트를 통짜 이미지로 (`spine_contact_sheet` → `spine_render_frames`)
+
+Spine 에디터에서 skel을 열고, 파츠 경로를 잡고, 애니메이션 탭에서 마커를 움직여 프레임을 찍던 작업을 CLI로 대신합니다. **라이선스가 있는 Spine 에디터(Pro, 3.8.x)** 가 필요하고, 기본 경로가 아니면 환경변수 `SPINE_CLI`나 `spineCliPath`로 `Spine.com`을 알려 주세요.
+
+1. `spine_contact_sheet`로 `outputDir\sheets\sheet_NN.png`를 만듭니다. 한 줄이 애니메이션 하나이고, 각 프레임에 `시간 #번호`가 적혀 있습니다. 캔버스는 애니메이션이 실제로 그리는 영역으로 잘라 보여 줍니다. 모든 프레임은 `frames\`에도 남습니다.
+2. 시트를 보고 프레임을 골라 `spine_render_frames`에 `frames: ["standby@0.50=cover", ...]`(애니메이션@초=파일 이름)로 넘깁니다. 결과는 `picked\<이름>.png`, 선택은 `recipe.json`에 저장됩니다.
+3. 같은 선택을 다른 크기로 다시 뽑으려면 `recipePath`와 `exportScalePercent`를 주면 됩니다.
+
+- **임포트 스케일 0.5(기본값, 바꿀 수 있음)**: 뮤즈대시 파츠 PNG는 스켈레톤이 만들어진 크기의 절반이라, 1배로 가져오면 조각들이 흩어져 보입니다. 0.5로 가져와야 에디터에서 보던 조립된 모양이 나옵니다(보스 `0101`의 `standby`는 307×430).
+- 파츠 경로는 `<번들>\원본\X.skel` 옆의 `<번들>\파츠\X`를 자동으로 씁니다. 다르면 `partsDir`를 주세요. skel 머리말에는 이미지 경로가 없고 CLI로도 지정할 수 없어서, 내부적으로 skel → 프로젝트 → JSON으로 한 번 바꿔 `images` 경로를 채운 뒤 다시 가져옵니다. 이 프로젝트는 `outputDir\_spine\`에 저장되어 같은 입력이면 재사용합니다(첫 실행 약 1분, 이후 20~30초).
+- 같은 애니메이션의 프레임은 같은 캔버스 크기(최대 영역)로 나옵니다. 에디터에서 내보낼 때와 같습니다.
+- 파츠가 모자라면 `warnings`에 "not found"가 나옵니다(예: `0103_air`는 `0103/images_road/smoke`를 쓰는데 이 아틀라스에는 없음).
 
 ## 빌드 / 실행
 
@@ -116,6 +131,7 @@ Visual Studio에서는 `asset tool.slnx`를 열면 됩니다.
 | `AssetTool.Mcp/` | MCP 서버(AI용 도구) |
 | `AssetTool.Core/` | 아래 로직 전부(앱과 MCP가 함께 사용) |
 | `MainWindow.axaml(.cs)` | 화면과 버튼 동작 |
+| `SpineRenderer.cs` / `SpineRecipe.cs` / `ContactSheet.cs` | Spine 에디터 CLI 렌더, 프레임 선택 레시피, 컨택트 시트 |
 | `AtlasParser.cs` | `.atlas` 파서 |
 | `AtlasPacker.cs` | 파츠를 다시 아틀라스로 패킹(MaxRects)하고 `.atlas` 텍스트를 씁니다 |
 | `AtlasExtractor.cs` | 페이지 하나에서 리전 잘라내기·회전·정리·여백 복원 |
