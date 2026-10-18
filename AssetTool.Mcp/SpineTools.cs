@@ -274,7 +274,11 @@ public static class SpineTools
         [Description("Skeleton scale on import. Default 0.5 (see spine_contact_sheet).")] double importScale = 0.5,
         [Description("Crop each PNG to its painted area. Default true. When false every PNG has the scene-wide canvas.")] bool cropToContent = true,
         [Description("Transparent pixels kept around the crop. Default 2.")] int padding = 2,
-        [Description("Sampling rate used only when time is above 0. Default 10.")] double fps = 10,
+        [Description("Sampling rate used when time is above 0 or pick is 'largest'. Default 10.")] double fps = 10,
+        [Description("'time' (default): the frame at 'time' of 'animation'. 'largest': for every skeleton the sampled frame with the most painted pixels among the " +
+                     "candidateAnimations (else among the last frames of all animations except out_*), reported in chosenFrames. Use it when the standby loop starts squashed " +
+                     "(e.g. notes 06-08) or a note has no standby (e.g. 15) or the character is hidden at time 0.")] string pick = "time",
+        [Description("Regex on animation names considered by pick='largest'. Default '^(stand|standby\\d*)$'.")] string candidateAnimations = @"^(stand|standby\d*)$",
         [Description("'all' (default): a skeleton with skins besides 'default' is rendered once per skin as <skeleton>__<skin>.png " +
                      "(Muse Dash keeps some body parts only in skins such as origin/xiemei/Miku/RinLen; without this a note like 0914 shows only its shadow). " +
                      "The plain <skeleton>.png is written only when its default skin is complete. 'default': skeletons as they are, skins untouched.")] string skins = "all",
@@ -291,6 +295,16 @@ public static class SpineTools
                 case "default": includeSkins = false; break;
                 default: return new { ok = false, error = "skins는 all 또는 default여야 합니다." };
             }
+            bool pickLargest;
+            switch (pick.Trim().ToLowerInvariant())
+            {
+                case "time": pickLargest = false; break;
+                case "largest": pickLargest = true; break;
+                default: return new { ok = false, error = "pick은 time 또는 largest여야 합니다." };
+            }
+            Regex candidatePattern;
+            try { candidatePattern = new Regex(candidateAnimations, RegexOptions.CultureInvariant); }
+            catch (ArgumentException ex) { return new { ok = false, error = $"candidateAnimations 정규식 오류: {ex.Message}" }; }
             if (!Directory.Exists(rootDir))
                 return new { ok = false, error = $"폴더가 없습니다: {rootDir}" };
             if (time < 0 || fps <= 0 || importScale <= 0 || padding < 0)
@@ -311,7 +325,7 @@ public static class SpineTools
 
             var settings = new SpineSettings { CliPath = spineCliPath, Version = spineVersion, ImportScale = importScale };
             // Frame 0 is all that is needed at time 0, so sample coarsely and keep the export small.
-            double sampleFps = time == 0 ? 1 : fps;
+            double sampleFps = time == 0 && !pickLargest ? 1 : fps;
 
             return await Task.Run<object>(() =>
             {
@@ -330,6 +344,7 @@ public static class SpineTools
                     var noParts = new List<string>();
                     var empty = new List<string>();
                     var skinVariants = new List<string>();
+                    var chosen = new List<string>();
                     var warnings = new List<string>();
                     string? error = null;
 
@@ -381,10 +396,31 @@ public static class SpineTools
                             Directory.CreateDirectory(outDir);
                             foreach (var name in names)
                             {
-                                var own = frames.Where(f => f.Skeleton == name && f.Animation == animation).OrderBy(f => f.Index).ToList();
-                                if (own.Count == 0) { missingAnimation.Add(name); continue; }
-                                int index = Math.Clamp((int)Math.Round(time * sampleFps), 0, own[^1].Index);
-                                var source = own.First(f => f.Index == index).Path;
+                                string source;
+                                if (pickLargest)
+                                {
+                                    // The standby loop of some notes starts squashed, and notes that only have in_* animations
+                                    // start hidden: take the frame where the most is painted.
+                                    var mine = frames.Where(f => f.Skeleton == name).ToList();
+                                    var candidates = mine.Where(f => candidatePattern.IsMatch(f.Animation)).ToList();
+                                    // No standby: use the last frame of each remaining animation, where the character has settled
+                                    // (a mid-way frame of an in_* animation can still be falling in on a long string).
+                                    if (candidates.Count == 0)
+                                        candidates = mine.Where(f => !f.Animation.StartsWith("out", StringComparison.OrdinalIgnoreCase))
+                                                         .GroupBy(f => f.Animation).Select(g => g.MaxBy(f => f.Index)!).ToList();
+                                    if (candidates.Count == 0) { missingAnimation.Add(name); continue; }
+                                    var best = candidates.Select(f => (Frame: f, Mass: PaintedMass(f.Path)))
+                                                         .OrderByDescending(x => x.Mass).ThenBy(x => x.Frame.Animation, StringComparer.Ordinal).ThenBy(x => x.Frame.Index).First();
+                                    source = best.Frame.Path;
+                                    chosen.Add($"{name} = {best.Frame.Animation}@{best.Frame.Index / sampleFps:0.00}");
+                                }
+                                else
+                                {
+                                    var own = frames.Where(f => f.Skeleton == name && f.Animation == animation).OrderBy(f => f.Index).ToList();
+                                    if (own.Count == 0) { missingAnimation.Add(name); continue; }
+                                    int index = Math.Clamp((int)Math.Round(time * sampleFps), 0, own[^1].Index);
+                                    source = own.First(f => f.Index == index).Path;
+                                }
                                 var dest = Path.Combine(outDir, name + ".png");
                                 if (!SaveFrame(source, dest, cropToContent, padding)) { empty.Add(name); continue; }
                                 rendered.Add(name);
@@ -413,6 +449,7 @@ public static class SpineTools
                         noPartsFolder = noParts,
                         emptyImage = empty,
                         skinVariants,
+                        chosenFrames = chosen,
                         stalePlainFiles = stale,
                         warnings = warnings.Distinct().Take(10),
                         error
@@ -429,6 +466,16 @@ public static class SpineTools
         {
             return new { ok = false, error = ex.Message };
         }
+    }
+
+    // Number of clearly visible pixels (alpha > 24): how much of the character is on screen in this frame.
+    private static long PaintedMass(string path)
+    {
+        var px = RgbaImage.Load(path).Pixels;
+        long n = 0;
+        for (int i = 3; i < px.Length; i += 4)
+            if (px[i] > 24) n++;
+        return n;
     }
 
     // Writes the frame as a PNG, cropped to the painted area plus padding. False if nothing is painted.
